@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+*.log
+
+# SQLite dev database and Prisma migration lock artifacts you may not want tracked
+prisma/dev.db
+prisma/dev.db-journal
+
+# Uploaded files (Phase 2) should never be committed — they belong in object storage
+/uploads/

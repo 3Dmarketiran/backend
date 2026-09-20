@@ -1,0 +1,351 @@
+// ================================================================
+// Multi-tenant 3D/AR Product Showcase Platform — Database Schema
+// Phase 1: full model, ready for SQLite (local dev) or Postgres (prod)
+// Switch datasource.provider to "postgresql" and set DATABASE_URL
+// to a Postgres connection string for production.
+// ================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite" // change to "postgresql" for production
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------------------
+// SQLite-compatible scalar representations
+// ----------------------------------------------------------------
+// Prisma SQLite does not support native enum or Json fields. The application
+// layer owns these string values and validates them with TypeScript/Zod.
+
+// ----------------------------------------------------------------
+// Core identity
+// ----------------------------------------------------------------
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  role         String
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // A SELLER user has exactly one seller profile; ADMIN/SUPER_ADMIN do not.
+  seller Seller?
+
+  sessions        Session[]
+  auditLogsActor  AuditLog[]         @relation("AuditActor")
+  subscriptionsBy Subscription[]     @relation("ActivatedByAdmin")
+  publishJobs     PublishJob[]       @relation("TriggeredByUser")
+  loginAttempts   LoginAttempt[]
+
+  @@index([role])
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model LoginAttempt {
+  id        String   @id @default(cuid())
+  email     String
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  success   Boolean
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  @@index([email, createdAt])
+}
+
+// ----------------------------------------------------------------
+// Tenant: Seller
+// ----------------------------------------------------------------
+
+model Seller {
+  id          String   @id @default(cuid())
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  slug        String   @unique
+  storeName   String
+  description String?
+  logoUrl     String?
+  contactEmail String?
+  contactPhone String?
+  socialLinks String?   // JSON-serialized object
+
+  isActive    Boolean  @default(true) // admin can hard-disable regardless of subscription
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  products      Product[]
+  subscriptions Subscription[]
+  publishJobs   PublishJob[]
+  analyticsEvents AnalyticsEvent[]
+  auditLogs     AuditLog[]       @relation("AuditSeller")
+
+  @@index([slug])
+}
+
+// ----------------------------------------------------------------
+// Catalog
+// ----------------------------------------------------------------
+
+model Category {
+  id        String   @id @default(cuid())
+  slug      String   @unique
+  name      String
+  parentId  String?
+  parent    Category?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children  Category[] @relation("CategoryTree")
+
+  products  Product[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Product {
+  id          String            @id @default(cuid())
+  sellerId    String
+  seller      Seller            @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  slug        String            @unique
+  name        String
+  shortDescription String?
+  fullDescription  String?
+
+  categoryId  String?
+  category    Category?         @relation(fields: [categoryId], references: [id])
+  tags        String?           // comma-separated; normalized in service layer
+
+  // Real-world dimensions, normalized internally to millimeters (see utils/dimensions.ts)
+  widthMm     Float?
+  heightMm    Float?
+  depthMm     Float?
+  inputUnit   String?       // MM | CM | M    // unit the seller originally entered, kept for display
+
+  visibility  String            @default("DRAFT")
+
+  // Denotes the currently PUBLISHED snapshot differs from DRAFT edits.
+  hasUnpublishedChanges Boolean @default(false)
+
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  publishedAt DateTime?
+
+  images      ProductImage[]
+  models      ProductModel[]
+  publishJobs PublishJob[]
+  analyticsEvents AnalyticsEvent[]
+  auditLogs   AuditLog[]        @relation("AuditProduct")
+
+  @@index([sellerId])
+  @@index([visibility])
+  @@index([categoryId])
+}
+
+model ProductImage {
+  id        String   @id @default(cuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  url       String   // storage-provider URL (see StorageProvider abstraction, Phase 2)
+  storageKey String  // internal key/path used by the storage provider
+  isPrimary Boolean  @default(false)
+  sortOrder Int      @default(0)
+  width     Int?
+  height    Int?
+  sizeBytes Int?
+
+  createdAt DateTime @default(now())
+
+  @@index([productId])
+}
+
+model ProductModel {
+  id        String   @id @default(cuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  kind      String   // "GLB" | "GLTF" | "USDZ"
+  url       String
+  storageKey String
+  sizeBytes Int?
+  posterImageUrl String?
+
+  createdAt DateTime @default(now())
+
+  @@index([productId])
+}
+
+// ----------------------------------------------------------------
+// Subscriptions
+// ----------------------------------------------------------------
+
+model SubscriptionPlan {
+  id           String   @id @default(cuid())
+  name         String
+  durationDays Int
+  price        Float
+  discountPct  Float?
+  features     String?          // JSON-serialized object
+  productLimit Int?
+  storageLimitMb Int?
+  isActive     Boolean  @default(true)
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  subscriptions Subscription[]
+}
+
+model Subscription {
+  id        String              @id @default(cuid())
+  sellerId  String
+  seller    Seller              @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  planId    String
+  plan      SubscriptionPlan    @relation(fields: [planId], references: [id])
+
+  status    String              @default("PENDING")
+  startDate DateTime?
+  endDate   DateTime?
+
+  activatedById String?
+  activatedBy   User?           @relation("ActivatedByAdmin", fields: [activatedById], references: [id])
+
+  notes     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([sellerId, status])
+}
+
+// ----------------------------------------------------------------
+// Publishing pipeline
+// ----------------------------------------------------------------
+
+model PublishJob {
+  id          String            @id @default(cuid())
+  sellerId    String
+  seller      Seller            @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  productId   String?
+  product     Product?          @relation(fields: [productId], references: [id])
+
+  triggeredById String
+  triggeredBy   User            @relation("TriggeredByUser", fields: [triggeredById], references: [id])
+
+  status      String            @default("QUEUED")
+  commitSha   String?
+  errorMessage String?
+
+  requestedAt DateTime          @default(now())
+  startedAt   DateTime?
+  finishedAt  DateTime?
+
+  logs        PublishLog[]
+
+  @@index([sellerId])
+  @@index([status])
+}
+
+model PublishLog {
+  id           String     @id @default(cuid())
+  publishJobId String
+  publishJob   PublishJob @relation(fields: [publishJobId], references: [id], onDelete: Cascade)
+
+  message      String
+  level        String     @default("info") // info | warn | error
+  createdAt    DateTime   @default(now())
+
+  @@index([publishJobId])
+}
+
+// ----------------------------------------------------------------
+// Analytics & Audit
+// ----------------------------------------------------------------
+
+model AnalyticsEvent {
+  id        String             @id @default(cuid())
+  type      String
+  sellerId  String?
+  seller    Seller?            @relation(fields: [sellerId], references: [id])
+  productId String?
+  product   Product?           @relation(fields: [productId], references: [id])
+
+  metadata  String?             // JSON-serialized object
+  createdAt DateTime           @default(now())
+
+  @@index([type, createdAt])
+  @@index([sellerId])
+  @@index([productId])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  actor     User?    @relation("AuditActor", fields: [actorId], references: [id])
+
+  sellerId  String?
+  seller    Seller?  @relation("AuditSeller", fields: [sellerId], references: [id])
+
+  productId String?
+  product   Product? @relation("AuditProduct", fields: [productId], references: [id])
+
+  action    String   // e.g. "PRODUCT_PUBLISHED", "LOGIN", "SUBSCRIPTION_ACTIVATED"
+  entity    String   // e.g. "Product", "Seller", "Subscription"
+  entityId  String?
+  ipAddress String?
+  metadata  String?             // JSON-serialized object
+
+  createdAt DateTime @default(now())
+
+  @@index([action, createdAt])
+  @@index([actorId])
+}
+
+// ----------------------------------------------------------------
+// Platform-wide settings / white-label branding
+// ----------------------------------------------------------------
+
+model PlatformSetting {
+  id            String   @id @default("singleton")
+
+  platformName  String   @default("پلتفرم نمایشگاه محصول")
+  logoUrl       String?
+  faviconUrl    String?
+
+  colorPrimary    String @default("#3730A3")
+  colorSecondary  String @default("#7C3AED")
+  colorAccent     String @default("#06B6D4")
+  colorBackground String @default("#F8FAFC")
+  colorText       String @default("#1E293B")
+  fontFamily      String @default("Vazirmatn")
+
+  socialLinks   String?           // JSON-serialized object
+  contactEmail  String?
+  contactPhone  String?
+
+  githubOwner      String?
+  githubRepository String?
+  githubBranch     String   @default("main")
+  // NOTE: GitHub token is NEVER stored here — it lives only in server env vars (GITHUB_TOKEN).
+
+  updatedAt     DateTime @updatedAt
+}
