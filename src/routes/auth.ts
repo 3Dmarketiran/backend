@@ -25,7 +25,7 @@ authRouter.post("/login", loginRateLimiter, async (req, res, next) => {
     res.cookie(SESSION_COOKIE_NAME, sessionId, {
       httpOnly: true,
       secure: isProduction, // requires HTTPS in production
-      sameSite: "lax",
+      sameSite: "none",
       expires: expiresAt,
       path: "/",
     });
