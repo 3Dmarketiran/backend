@@ -55,7 +55,6 @@ export class S3StorageProvider implements StorageProvider {
         Key: key,
         Body: params.buffer,
         ContentType: params.contentType,
-        ACL: "public-read",
         CacheControl: "public, max-age=31536000, immutable",
       })
     );
@@ -93,11 +92,12 @@ export class S3StorageProvider implements StorageProvider {
   }
 
   private publicUrl(key: string): string {
-    if (env.STORAGE_ENDPOINT) {
-      return `${env.STORAGE_ENDPOINT.replace(/\/$/, "")}/${this.bucket}/${key}`;
-    }
-    return `https://${this.bucket}.s3.amazonaws.com/${key}`;
-  }
+  const baseUrl =
+    env.PUBLIC_ASSET_BASE_URL ??
+    "https://sbmdpgkrjzbegcafdgbd.supabase.co/storage/v1/object/public/3Dmarketiran";
+
+  return `${baseUrl.replace(/\/$/, "")}/${key}`;
+}
 }
 
 function sanitizeFolder(input: string): string {
