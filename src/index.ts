@@ -35,7 +35,8 @@ app.use(helmet());
 app.use(
   cors({
     origin: env.CORS_ORIGIN.split(",").map((s) => s.trim()),
-    credentials: true, // required for HttpOnly session cookies
+    credentials: true,
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
 app.use(compression());
