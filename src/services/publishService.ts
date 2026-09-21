@@ -1,13 +1,10 @@
 import { prisma } from "../config/prisma";
-import { env } from "../config/env";
 
 import {
   upsertFile,
-  publishReleaseAsset,
   deleteFile,
 } from "./githubService";
 
-import { storage } from "../storage";
 import { publishQueue } from "./publishQueue";
 import { assertSellerCanPublish } from "./productService";
 import { millimetersToMeters } from "../utils/dimensions";
@@ -274,65 +271,6 @@ async function processPublishJob(jobId: string) {
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* 3D / GitHub Release publishing                                            */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Publishes a GLB / GLTF / USDZ model to the product's GitHub Release.
- *
- * The binary itself never enters the Git repository.
- *
- * GitHub Release URL is returned and later written into products.json.
- */
-async function publish3DAsset(
-  storageKey: string,
-  productId: string,
-  jobId: string,
-  kind: string
-): Promise<string> {
-  const buffer = await storage.read(storageKey);
-
-  const normalizedKind = kind.toUpperCase();
-
-  let extension: "glb" | "gltf" | "usdz";
-
-  switch (normalizedKind) {
-    case "USDZ":
-      extension = "usdz";
-      break;
-
-    case "GLTF":
-      extension = "gltf";
-      break;
-
-    case "GLB":
-    default:
-      extension = "glb";
-      break;
-  }
-
-  const result = await publishReleaseAsset({
-    productId,
-    content: buffer,
-    extension,
-    baseName: normalizedKind.toLowerCase(),
-  });
-
-  if (result.changed) {
-    await log(
-      jobId,
-      `آپلود مدل ${normalizedKind} به GitHub Release انجام شد: ${storageKey}`
-    );
-  } else {
-    await log(
-      jobId,
-      `مدل ${normalizedKind} از قبل در GitHub Release موجود بود: ${storageKey}`
-    );
-  }
-
-  return result.url;
-}
 
 /* -------------------------------------------------------------------------- */
 /* Public catalog generation                                                  */
@@ -449,10 +387,6 @@ async function getPublicProducts(jobId: string) {
     const models = [];
 
     for (const model of product.models) {
-      const is3DModel =
-        model.kind === "GLB" ||
-        model.kind === "GLTF" ||
-        model.kind === "USDZ";
 
       const url = model.url;
       
