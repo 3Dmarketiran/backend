@@ -454,16 +454,8 @@ async function getPublicProducts(jobId: string) {
         model.kind === "GLTF" ||
         model.kind === "USDZ";
 
-      const url =
-        env.PUBLISH_ASSETS_TO_GITHUB && is3DModel
-          ? await publish3DAsset(
-              model.storageKey,
-              product.id,
-              jobId,
-              model.kind
-            )
-          : model.url;
-
+      const url = model.url;
+      
       models.push({
         kind: model.kind,
         url,
