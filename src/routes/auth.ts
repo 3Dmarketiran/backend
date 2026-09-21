@@ -24,7 +24,7 @@ authRouter.post("/login", loginRateLimiter, async (req, res, next) => {
 
     res.cookie(SESSION_COOKIE_NAME, sessionId, {
       httpOnly: true,
-      secure: isProduction, // requires HTTPS in production
+      secure: isProduction,
       sameSite: "none",
       expires: expiresAt,
       path: "/",
@@ -32,6 +32,8 @@ authRouter.post("/login", loginRateLimiter, async (req, res, next) => {
 
     res.json({
       user: { id: user.id, email: user.email, role: user.role },
+      sessionId,
+      expiresAt: expiresAt.toISOString(),
     });
   } catch (err) {
     next(err);
@@ -40,9 +42,20 @@ authRouter.post("/login", loginRateLimiter, async (req, res, next) => {
 
 authRouter.post("/logout", requireAuth, async (req, res, next) => {
   try {
-    const sessionId = req.cookies?.[SESSION_COOKIE_NAME];
+    const cookieSession = req.cookies?.[SESSION_COOKIE_NAME];
+    const bearerSession =
+      req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
+    const sessionId = cookieSession || bearerSession;
+
     if (sessionId) await logout(sessionId, req.user!.id);
-    res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
+
+    res.clearCookie(SESSION_COOKIE_NAME, {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: "none",
+      path: "/",
+    });
+
     res.json({ success: true });
   } catch (err) {
     next(err);
@@ -56,7 +69,11 @@ authRouter.get("/me", requireAuth, (req, res) => {
       email: req.user!.email,
       role: req.user!.role,
       seller: req.user!.seller
-        ? { id: req.user!.seller.id, slug: req.user!.seller.slug, storeName: req.user!.seller.storeName }
+        ? {
+            id: req.user!.seller.id,
+            slug: req.user!.seller.slug,
+            storeName: req.user!.seller.storeName,
+          }
         : null,
     },
   });
