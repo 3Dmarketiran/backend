@@ -823,6 +823,9 @@ async function getPublicSellers() {
       contactPhone:
         seller.contactPhone,
 
+      address:
+        seller.address,
+
       socialLinks:
         parseJson(
           seller.socialLinks,

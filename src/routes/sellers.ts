@@ -137,6 +137,8 @@ sellersRouter.get(
             seller.contactEmail,
           contactPhone:
             seller.contactPhone,
+          address:
+            seller.address,
           socialLinks: parseJson(
             seller.socialLinks,
             {}
@@ -418,6 +420,12 @@ const updateSellerSchema =
       .max(30)
       .optional(),
 
+    address: z
+      .string()
+      .trim()
+      .max(300)
+      .optional(),
+
     socialLinks: z
       .record(z.string().trim().url())
       .optional(),
@@ -556,6 +564,14 @@ sellersRouter.put(
               ? {
                   contactPhone:
                     input.contactPhone,
+                }
+              : {}),
+
+            ...(input.address !==
+            undefined
+              ? {
+                  address:
+                    input.address,
                 }
               : {}),
 

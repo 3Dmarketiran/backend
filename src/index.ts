@@ -197,7 +197,7 @@ app.use("/api", attachUser);
 if (env.STORAGE_PROVIDER === "local") {
   app.use(
     "/files",
-    express.static("storage", {
+    express.static("uploads", {
       maxAge: isProduction ? "365d" : 0,
       immutable: isProduction,
       fallthrough: false,

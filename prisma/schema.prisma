@@ -84,6 +84,7 @@ model Seller {
   logoUrl      String?
   contactEmail String?
   contactPhone String?
+  address      String?
   socialLinks  String?   // JSON-serialized object
 
   isActive     Boolean  @default(true) // admin can hard-disable regardless of subscription
