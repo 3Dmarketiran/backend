@@ -3,16 +3,18 @@ import { z } from "zod";
 import { prisma } from "../config/prisma";
 import { requireAuth } from "../middleware/auth";
 import { requireAdmin, requireOwnSeller } from "../middleware/rbac";
+import { uploadLogo } from "../middleware/upload";
 import { HttpError } from "../middleware/errorHandler";
 import { createUserWithRole } from "../services/authService";
 import { slugify } from "../utils/slug";
 import { parseJson, serializeJson } from "../utils/json";
+import { storage } from "../storage";
 
 export const sellersRouter = Router();
 
 // ---------------------------------------------------------------------
 // Public: storefront lookup by slug. Only visible if seller is active
-// AND has a currently-active subscription (spec sections 20/22).
+// AND has a currently-active subscription.
 // ---------------------------------------------------------------------
 
 sellersRouter.get("/by-slug/:slug", async (req, res, next) => {
@@ -20,11 +22,19 @@ sellersRouter.get("/by-slug/:slug", async (req, res, next) => {
     const seller = await prisma.seller.findUnique({
       where: { slug: req.params.slug },
       include: {
-        subscriptions: { where: { status: "ACTIVE", endDate: { gte: new Date() } } },
+        subscriptions: {
+          where: {
+            status: "ACTIVE",
+            endDate: { gte: new Date() },
+          },
+        },
       },
     });
 
-    const isPubliclyVisible = seller?.isActive && (seller?.subscriptions.length ?? 0) > 0;
+    const isPubliclyVisible =
+      seller?.isActive &&
+      (seller?.subscriptions.length ?? 0) > 0;
+
     if (!seller || !isPubliclyVisible) {
       throw new HttpError(404, "فروشنده یافت نشد.");
     }
@@ -50,73 +60,129 @@ sellersRouter.get("/by-slug/:slug", async (req, res, next) => {
 // Admin: list / manage sellers
 // ---------------------------------------------------------------------
 
-sellersRouter.get("/", requireAuth, requireAdmin, async (_req, res, next) => {
-  try {
-    const sellers = await prisma.seller.findMany({
-      include: {
-        user: { select: { email: true, isActive: true, createdAt: true } },
-        _count: { select: { products: true } },
-        subscriptions: {
-          where: { status: "ACTIVE", endDate: { gte: new Date() } },
-          orderBy: { endDate: "desc" },
-          take: 1,
+sellersRouter.get(
+  "/",
+  requireAuth,
+  requireAdmin,
+  async (_req, res, next) => {
+    try {
+      const sellers = await prisma.seller.findMany({
+        include: {
+          user: {
+            select: {
+              email: true,
+              isActive: true,
+              createdAt: true,
+            },
+          },
+          _count: {
+            select: {
+              products: true,
+            },
+          },
+          subscriptions: {
+            where: {
+              status: "ACTIVE",
+              endDate: { gte: new Date() },
+            },
+            orderBy: {
+              endDate: "desc",
+            },
+            take: 1,
+          },
         },
-      },
-      orderBy: { createdAt: "desc" },
-    });
-    res.json({ sellers: sellers.map((seller) => ({ ...seller, socialLinks: parseJson(seller.socialLinks, {}) })) });
-  } catch (err) {
-    next(err);
+        orderBy: {
+          createdAt: "desc",
+        },
+      });
+
+      res.json({
+        sellers: sellers.map((seller) => ({
+          ...seller,
+          socialLinks: parseJson(seller.socialLinks, {}),
+        })),
+      });
+    } catch (err) {
+      next(err);
+    }
   }
-});
+);
 
 const createSellerSchema = z.object({
   email: z.string().email(),
-  password: z.string().min(8, "رمز عبور باید حداقل ۸ کاراکتر باشد."),
+  password: z
+    .string()
+    .min(8, "رمز عبور باید حداقل ۸ کاراکتر باشد."),
   storeName: z.string().min(2).max(120),
   contactEmail: z.string().email().optional(),
   contactPhone: z.string().max(30).optional(),
 });
 
-// Admin-only: creates seller accounts (no public self-registration, per spec).
-sellersRouter.post("/", requireAuth, requireAdmin, async (req, res, next) => {
-  try {
-    const input = createSellerSchema.parse(req.body);
-    const slug = slugify(input.storeName);
+// Admin-only: creates seller accounts.
+sellersRouter.post(
+  "/",
+  requireAuth,
+  requireAdmin,
+  async (req, res, next) => {
+    try {
+      const input = createSellerSchema.parse(req.body);
+      const slug = slugify(input.storeName);
 
-    const user = await createUserWithRole({
-      email: input.email,
-      password: input.password,
-      role: "SELLER",
-      seller: { storeName: input.storeName, slug },
-    });
-
-    if (input.contactEmail || input.contactPhone) {
-      await prisma.seller.update({
-        where: { id: user.seller!.id },
-        data: { contactEmail: input.contactEmail, contactPhone: input.contactPhone },
+      const user = await createUserWithRole({
+        email: input.email,
+        password: input.password,
+        role: "SELLER",
+        seller: {
+          storeName: input.storeName,
+          slug,
+        },
       });
-    }
 
-    await prisma.auditLog.create({
-      data: {
-        actorId: req.user!.id,
-        sellerId: user.seller!.id,
-        action: "SELLER_CREATED",
-        entity: "Seller",
-        entityId: user.seller!.id,
-        ipAddress: req.ip,
-      },
-    });
+      if (input.contactEmail || input.contactPhone) {
+        await prisma.seller.update({
+          where: {
+            id: user.seller!.id,
+          },
+          data: {
+            contactEmail: input.contactEmail,
+            contactPhone: input.contactPhone,
+          },
+        });
+      }
 
-    res.status(201).json({ seller: user.seller });
-  } catch (err) {
-    if (err instanceof Error && "code" in err && (err as { code?: string }).code === "P2002") {
-      return next(new HttpError(409, "این ایمیل قبلاً ثبت شده است."));
+      await prisma.auditLog.create({
+        data: {
+          actorId: req.user!.id,
+          sellerId: user.seller!.id,
+          action: "SELLER_CREATED",
+          entity: "Seller",
+          entityId: user.seller!.id,
+          ipAddress: req.ip,
+        },
+      });
+
+      res.status(201).json({
+        seller: user.seller,
+      });
+    } catch (err) {
+      if (
+        err instanceof Error &&
+        "code" in err &&
+        (err as { code?: string }).code === "P2002"
+      ) {
+        return next(
+          new HttpError(409, "این ایمیل قبلاً ثبت شده است.")
+        );
+      }
+
+      next(err);
     }
-    next(err);
   }
-});
+);
+
+// ---------------------------------------------------------------------
+// Seller profile update
+// ---------------------------------------------------------------------
 
 const updateSellerSchema = z.object({
   storeName: z.string().min(2).max(120).optional(),
@@ -125,46 +191,197 @@ const updateSellerSchema = z.object({
   contactEmail: z.string().email().optional(),
   contactPhone: z.string().max(30).optional(),
   socialLinks: z.record(z.string().url()).optional(),
-  isActive: z.boolean().optional(), // admin-only field, stripped below for sellers
+  isActive: z.boolean().optional(),
 });
 
-sellersRouter.put("/:id", requireAuth, requireOwnSeller(), async (req, res, next) => {
-  try {
-    const input = updateSellerSchema.parse(req.body);
-    const isAdmin = req.user!.role === "ADMIN" || req.user!.role === "SUPER_ADMIN";
+sellersRouter.put(
+  "/:id",
+  requireAuth,
+  requireOwnSeller(),
+  async (req, res, next) => {
+    try {
+      const input = updateSellerSchema.parse(req.body);
 
-    const seller = await prisma.seller.update({
-      where: { id: req.params.id },
-      data: {
-        storeName: input.storeName,
-        description: input.description,
-        logoUrl: input.logoUrl,
-        contactEmail: input.contactEmail,
-        contactPhone: input.contactPhone,
-        socialLinks: serializeJson(input.socialLinks),
-        // A seller can never activate/deactivate themselves — admin only.
-        ...(isAdmin && input.isActive !== undefined ? { isActive: input.isActive } : {}),
-      },
-    });
+      const isAdmin =
+        req.user!.role === "ADMIN" ||
+        req.user!.role === "SUPER_ADMIN";
 
-    res.json({ seller: { ...seller, socialLinks: parseJson(seller.socialLinks, {}) } });
-  } catch (err) {
-    next(err);
+      const seller = await prisma.seller.update({
+        where: {
+          id: req.params.id,
+        },
+        data: {
+          storeName: input.storeName,
+          description: input.description,
+          logoUrl: input.logoUrl,
+          contactEmail: input.contactEmail,
+          contactPhone: input.contactPhone,
+          socialLinks: serializeJson(input.socialLinks),
+
+          // Sellers can never activate/deactivate themselves.
+          ...(isAdmin && input.isActive !== undefined
+            ? {
+                isActive: input.isActive,
+              }
+            : {}),
+        },
+      });
+
+      res.json({
+        seller: {
+          ...seller,
+          socialLinks: parseJson(
+            seller.socialLinks,
+            {}
+          ),
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
   }
-});
+);
 
-sellersRouter.get("/:id", requireAuth, requireOwnSeller(), async (req, res, next) => {
-  try {
-    const seller = await prisma.seller.findUnique({
-      where: { id: req.params.id },
-      include: {
-        subscriptions: { orderBy: { createdAt: "desc" }, include: { plan: true } },
-        _count: { select: { products: true } },
-      },
-    });
-    if (!seller) throw new HttpError(404, "فروشنده یافت نشد.");
-    res.json({ seller: { ...seller, socialLinks: parseJson(seller.socialLinks, {}), subscriptions: seller.subscriptions.map((s) => ({ ...s, plan: { ...s.plan, features: parseJson(s.plan.features, {}) } })) } });
-  } catch (err) {
-    next(err);
+// ---------------------------------------------------------------------
+// Seller logo upload
+//
+// POST /api/sellers/:id/logo
+//
+// The actual image validation and 5MB limit are handled by uploadLogo.
+// The file is persisted through the configured StorageProvider so this
+// works with both local storage and S3-compatible storage.
+// ---------------------------------------------------------------------
+
+sellersRouter.post(
+  "/:id/logo",
+  requireAuth,
+  requireOwnSeller(),
+  uploadLogo,
+  async (req, res, next) => {
+    try {
+      if (!req.file) {
+        throw new HttpError(
+          400,
+          "فایل لوگو ارسال نشده است."
+        );
+      }
+
+      const seller = await prisma.seller.findUnique({
+        where: {
+          id: req.params.id,
+        },
+      });
+
+      if (!seller) {
+        throw new HttpError(
+          404,
+          "فروشنده یافت نشد."
+        );
+      }
+
+      const stored = await storage.save({
+        folder: `sellers/${seller.id}/logo`,
+        filename: req.file.originalname,
+        buffer: req.file.buffer,
+        contentType: req.file.mimetype,
+      });
+
+      const updatedSeller = await prisma.seller.update({
+        where: {
+          id: seller.id,
+        },
+        data: {
+          logoUrl: stored.url,
+        },
+      });
+
+      await prisma.auditLog.create({
+        data: {
+          actorId: req.user!.id,
+          sellerId: seller.id,
+          action: "SELLER_LOGO_UPDATED",
+          entity: "Seller",
+          entityId: seller.id,
+          ipAddress: req.ip,
+        },
+      });
+
+      res.status(201).json({
+        seller: {
+          ...updatedSeller,
+          socialLinks: parseJson(
+            updatedSeller.socialLinks,
+            {}
+          ),
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
   }
-});
+);
+
+// ---------------------------------------------------------------------
+// Seller details
+// ---------------------------------------------------------------------
+
+sellersRouter.get(
+  "/:id",
+  requireAuth,
+  requireOwnSeller(),
+  async (req, res, next) => {
+    try {
+      const seller = await prisma.seller.findUnique({
+        where: {
+          id: req.params.id,
+        },
+        include: {
+          subscriptions: {
+            orderBy: {
+              createdAt: "desc",
+            },
+            include: {
+              plan: true,
+            },
+          },
+          _count: {
+            select: {
+              products: true,
+            },
+          },
+        },
+      });
+
+      if (!seller) {
+        throw new HttpError(
+          404,
+          "فروشنده یافت نشد."
+        );
+      }
+
+      res.json({
+        seller: {
+          ...seller,
+          socialLinks: parseJson(
+            seller.socialLinks,
+            {}
+          ),
+          subscriptions: seller.subscriptions.map(
+            (subscription) => ({
+              ...subscription,
+              plan: {
+                ...subscription.plan,
+                features: parseJson(
+                  subscription.plan.features,
+                  {}
+                ),
+              },
+            })
+          ),
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
