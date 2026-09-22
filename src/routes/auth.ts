@@ -7,8 +7,12 @@ import {
   createSession,
   getUserBySession,
   login,
+  logout,
 } from "../services/authService";
-import { env, isProduction } from "../config/env";
+import {
+  env,
+  isProduction,
+} from "../config/env";
 
 const router = Router();
 
@@ -33,7 +37,9 @@ const loginSchema = z.object({
 const getCookieOptions = () => ({
   httpOnly: true,
   secure: isProduction,
-  sameSite: isProduction ? ("none" as const) : ("lax" as const),
+  sameSite: isProduction
+    ? ("none" as const)
+    : ("lax" as const),
   path: "/",
   maxAge: COOKIE_MAX_AGE_MS,
 });
@@ -41,7 +47,9 @@ const getCookieOptions = () => ({
 const getClearCookieOptions = () => ({
   httpOnly: true,
   secure: isProduction,
-  sameSite: isProduction ? ("none" as const) : ("lax" as const),
+  sameSite: isProduction
+    ? ("none" as const)
+    : ("lax" as const),
   path: "/",
 });
 
@@ -56,14 +64,18 @@ const setSessionCookie = (
   );
 };
 
-const clearSessionCookie = (res: Response) => {
+const clearSessionCookie = (
+  res: Response,
+) => {
   res.clearCookie(
     SESSION_COOKIE_NAME,
     getClearCookieOptions(),
   );
 };
 
-const getBearerToken = (req: Request) => {
+const getBearerToken = (
+  req: Request,
+): string | null => {
   const authorization =
     req.headers.authorization;
 
@@ -72,7 +84,7 @@ const getBearerToken = (req: Request) => {
   }
 
   const [scheme, token] =
-    authorization.split(" ");
+    authorization.trim().split(/\s+/);
 
   if (
     scheme?.toLowerCase() !== "bearer" ||
@@ -83,6 +95,63 @@ const getBearerToken = (req: Request) => {
 
   return token.trim() || null;
 };
+
+const getClientIp = (
+  req: Request,
+): string | undefined => {
+  const forwardedFor =
+    req.headers["x-forwarded-for"];
+
+  if (typeof forwardedFor === "string") {
+    const firstIp = forwardedFor
+      .split(",")[0]
+      ?.trim();
+
+    if (firstIp) {
+      return firstIp;
+    }
+  }
+
+  if (Array.isArray(forwardedFor)) {
+    const firstIp =
+      forwardedFor[0]?.trim();
+
+    if (firstIp) {
+      return firstIp;
+    }
+  }
+
+  return req.ip || undefined;
+};
+
+const getUserAgent = (
+  req: Request,
+): string | undefined => {
+  const userAgent =
+    req.headers["user-agent"];
+
+  if (typeof userAgent !== "string") {
+    return undefined;
+  }
+
+  return userAgent
+    .trim()
+    .slice(0, 1000) || undefined;
+};
+
+const serializeUser = (user: any) => ({
+  id: user.id,
+  email: user.email,
+  role: user.role,
+  seller: user.seller
+    ? {
+        id: user.seller.id,
+        slug: user.seller.slug,
+        storeName:
+          user.seller.storeName,
+      }
+    : null,
+});
 
 /**
  * POST /api/auth/login
@@ -99,59 +168,52 @@ router.post(
         return res.status(400).json({
           success: false,
           error: "INVALID_INPUT",
-          message: "ایمیل یا رمز عبور معتبر نیست.",
+          message:
+            "ایمیل یا رمز عبور معتبر نیست.",
         });
       }
 
-      const { email, password } =
-        parsed.data;
+      const {
+        email,
+        password,
+      } = parsed.data;
+
+      const ipAddress =
+        getClientIp(req);
+
+      const userAgent =
+        getUserAgent(req);
 
       const result = await login(
         email,
         password,
+        ipAddress,
+        userAgent,
       );
 
-      if (!result) {
-        return res.status(401).json({
-          success: false,
-          error: "INVALID_CREDENTIALS",
-          message:
-            "ایمیل یا رمز عبور اشتباه است.",
-        });
-      }
-
-      const sessionId =
-        await createSession(result.user.id);
+      const session =
+        await createSession(
+          result.user.id,
+          ipAddress,
+          userAgent,
+        );
 
       setSessionCookie(
         res,
-        sessionId,
+        session.id,
       );
-
-      const user = result.user;
 
       return res.status(200).json({
         success: true,
 
-        user: {
-          id: user.id,
-          email: user.email,
-          role: user.role,
-          seller: user.seller
-            ? {
-                id: user.seller.id,
-                slug: user.seller.slug,
-                storeName:
-                  user.seller.storeName,
-              }
-            : null,
-        },
+        user: serializeUser(
+          result.user,
+        ),
 
         session: {
-          id: sessionId,
-          expiresAt: new Date(
-            Date.now() + COOKIE_MAX_AGE_MS,
-          ).toISOString(),
+          id: session.id,
+          expiresAt:
+            session.expiresAt.toISOString(),
         },
       });
     } catch (error) {
@@ -163,7 +225,7 @@ router.post(
 /**
  * GET /api/auth/me
  *
- * Supports both:
+ * Supports:
  * - HttpOnly session cookie
  * - Authorization: Bearer <session>
  */
@@ -181,7 +243,8 @@ router.get(
         return res.status(401).json({
           success: false,
           error: "UNAUTHORIZED",
-          message: "احراز هویت انجام نشده است.",
+          message:
+            "احراز هویت انجام نشده است.",
         });
       }
 
@@ -203,20 +266,7 @@ router.get(
 
       return res.status(200).json({
         success: true,
-
-        user: {
-          id: user.id,
-          email: user.email,
-          role: user.role,
-          seller: user.seller
-            ? {
-                id: user.seller.id,
-                slug: user.seller.slug,
-                storeName:
-                  user.seller.storeName,
-              }
-            : null,
-        },
+        user: serializeUser(user),
       });
     } catch (error) {
       return next(error);
@@ -226,11 +276,6 @@ router.get(
 
 /**
  * POST /api/auth/logout
- *
- * Clears the browser session cookie.
- *
- * The current session is also invalidated when the
- * authentication service supports session deletion.
  */
 router.post(
   "/logout",
@@ -245,19 +290,13 @@ router.post(
       clearSessionCookie(res);
 
       if (sessionId) {
-        const { prisma } =
-          await import("../lib/prisma");
-
-        await prisma.session.deleteMany({
-          where: {
-            id: sessionId,
-          },
-        });
+        await logout(sessionId);
       }
 
       return res.status(200).json({
         success: true,
-        message: "با موفقیت خارج شدید.",
+        message:
+          "با موفقیت خارج شدید.",
       });
     } catch (error) {
       return next(error);
