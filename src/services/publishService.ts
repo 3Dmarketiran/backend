@@ -139,7 +139,7 @@ async function processPublishJob(jobId: string) {
     ] = await Promise.all([
       getPublicProducts(jobId),
       getPublicSellers(),
-      prisma.category.findMany(),
+      getPublicCategories(),
       prisma.platformSetting.findUnique({
         where: { id: "singleton" },
       }),
@@ -147,7 +147,7 @@ async function processPublishJob(jobId: string) {
 
     await log(
       jobId,
-      `تولید داده استاتیک: ${products.length} محصول، ${sellers.length} فروشنده.`
+      `تولید داده استاتیک: ${products.length} محصول، ${sellers.length} فروشنده، ${categories.length} دسته‌بندی فعال.`
     );
 
     let lastCommitSha: string | null = null;
@@ -172,6 +172,8 @@ async function processPublishJob(jobId: string) {
 
     /*
      * Categories
+     *
+     * Only active categories are published.
      */
     lastCommitSha = await upsertFile(
       `${PUBLIC_DATA_DIR}/categories.json`,
@@ -271,7 +273,6 @@ async function processPublishJob(jobId: string) {
   }
 }
 
-
 /* -------------------------------------------------------------------------- */
 /* Public catalog generation                                                  */
 /* -------------------------------------------------------------------------- */
@@ -281,6 +282,10 @@ async function processPublishJob(jobId: string) {
  *
  * Only products belonging to active sellers with active subscriptions
  * are exposed.
+ *
+ * Products connected to inactive categories remain publishable, but their
+ * public category is returned as null. This keeps the public catalog
+ * consistent with the active-category list.
  */
 async function getPublicProducts(jobId: string) {
   const job = await prisma.publishJob.findUnique({
@@ -358,6 +363,7 @@ async function getPublicProducts(jobId: string) {
         select: {
           slug: true,
           name: true,
+          isActive: true,
         },
       },
     },
@@ -387,22 +393,36 @@ async function getPublicProducts(jobId: string) {
     const models = [];
 
     for (const model of product.models) {
-
       const url = model.url;
-      
+
       models.push({
         kind: model.kind,
         url,
       });
     }
 
+    /*
+     * Inactive categories are intentionally hidden from the public
+     * catalog. The product itself can still remain public.
+     */
+    const category =
+      product.category &&
+      product.category.isActive
+        ? {
+            slug: product.category.slug,
+            name: product.category.name,
+          }
+        : null;
+
     result.push({
       id: product.id,
       slug: product.slug,
       name: product.name,
 
-      shortDescription: product.shortDescription,
-      fullDescription: product.fullDescription,
+      shortDescription:
+        product.shortDescription,
+      fullDescription:
+        product.fullDescription,
 
       tags:
         product.tags
@@ -410,12 +430,7 @@ async function getPublicProducts(jobId: string) {
           .map((tag) => tag.trim())
           .filter(Boolean) ?? [],
 
-      category: product.category
-        ? {
-            slug: product.category.slug,
-            name: product.category.name,
-          }
-        : null,
+      category,
 
       seller: {
         slug: product.seller.slug,
@@ -431,15 +446,21 @@ async function getPublicProducts(jobId: string) {
         product.depthMm
           ? {
               widthM: product.widthMm
-                ? millimetersToMeters(product.widthMm)
+                ? millimetersToMeters(
+                    product.widthMm
+                  )
                 : null,
 
               heightM: product.heightMm
-                ? millimetersToMeters(product.heightMm)
+                ? millimetersToMeters(
+                    product.heightMm
+                  )
                 : null,
 
               depthM: product.depthMm
-                ? millimetersToMeters(product.depthMm)
+                ? millimetersToMeters(
+                    product.depthMm
+                  )
                 : null,
 
               realWorldScale: true,
@@ -455,6 +476,8 @@ async function getPublicProducts(jobId: string) {
 
 /**
  * Generates the public seller catalog.
+ *
+ * Only active sellers with active subscriptions are exposed.
  */
 async function getPublicSellers() {
   const sellers = await prisma.seller.findMany({
@@ -484,6 +507,32 @@ async function getPublicSellers() {
       {}
     ),
   }));
+}
+
+/**
+ * Generates the public category catalog.
+ *
+ * Only active categories are exposed publicly.
+ */
+async function getPublicCategories() {
+  return prisma.category.findMany({
+    where: {
+      isActive: true,
+    },
+
+    select: {
+      id: true,
+      slug: true,
+      name: true,
+      parentId: true,
+    },
+
+    orderBy: [
+      {
+        name: "asc",
+      },
+    ],
+  });
 }
 
 /* -------------------------------------------------------------------------- */
