@@ -1,10 +1,5 @@
 import { prisma } from "../config/prisma";
-
-import {
-  upsertFile,
-  deleteFile,
-} from "./githubService";
-
+import { upsertFile, deleteFile } from "./githubService";
 import { publishQueue } from "./publishQueue";
 import { assertSellerCanPublish } from "./productService";
 import { millimetersToMeters } from "../utils/dimensions";
@@ -17,9 +12,6 @@ const PUBLIC_DATA_DIR = "public-data";
 /**
  * Enqueues a publish job for one product.
  *
- * The actual publishing happens asynchronously through the shared
- * publish queue:
- *
  * QUEUED -> PROCESSING -> SUCCESS | FAILED
  */
 export async function requestPublish(
@@ -27,7 +19,9 @@ export async function requestPublish(
   triggeredByUserId: string
 ) {
   const product = await prisma.product.findUnique({
-    where: { id: productId },
+    where: {
+      id: productId,
+    },
   });
 
   if (!product) {
@@ -51,17 +45,19 @@ export async function requestPublish(
 }
 
 /**
- * Requests that a product be unpublished.
+ * Requests that a product be removed from the public catalog.
  *
- * The product remains in the database, but becomes HIDDEN.
- * A new publish job regenerates the public catalog.
+ * The product remains in the database and becomes HIDDEN.
+ * The publish worker then regenerates the public catalog.
  */
 export async function requestUnpublish(
   productId: string,
   triggeredByUserId: string
 ) {
   const product = await prisma.product.findUnique({
-    where: { id: productId },
+    where: {
+      id: productId,
+    },
   });
 
   if (!product) {
@@ -69,7 +65,9 @@ export async function requestUnpublish(
   }
 
   await prisma.product.update({
-    where: { id: productId },
+    where: {
+      id: productId,
+    },
     data: {
       visibility: "HIDDEN",
     },
@@ -97,96 +95,97 @@ async function log(
   message: string,
   level: "info" | "warn" | "error" = "info"
 ) {
-  await prisma.publishLog.create({
-    data: {
-      publishJobId: jobId,
-      message,
-      level,
-    },
-  });
+  try {
+    await prisma.publishLog.create({
+      data: {
+        publishJobId: jobId,
+        message,
+        level,
+      },
+    });
+  } catch (error) {
+    logger.error(
+      {
+        err: error,
+        jobId,
+      },
+      "failed to write publish log"
+    );
+  }
 }
 
 /**
- * The actual publish worker.
+ * Processes one publish job.
  *
- * The worker:
+ * The worker creates a complete public snapshot from the current database
+ * state and writes the generated JSON files to GitHub.
  *
- * 1. Loads the current public catalog from the database.
- * 2. Uploads 3D assets to GitHub Releases.
- * 3. Generates public-data/*.json.
- * 4. Commits only JSON/static metadata to the repository.
- * 5. Marks the product as PUBLISHED after GitHub succeeds.
- *
- * GLB/USDZ files are NOT committed to the Git repository.
+ * Binary assets are NOT committed into the Git repository.
+ * Asset URLs remain controlled by the configured storage provider.
  */
 async function processPublishJob(jobId: string) {
-  await prisma.publishJob.update({
-    where: { id: jobId },
-    data: {
-      status: "PROCESSING",
-      startedAt: new Date(),
-    },
-  });
-
-  await log(jobId, "شروع پردازش انتشار...");
+  const startedAt = new Date();
 
   try {
-    const [
-      products,
-      sellers,
-      categories,
-      settings,
-    ] = await Promise.all([
-      getPublicProducts(jobId),
-      getPublicSellers(),
-      getPublicCategories(),
-      prisma.platformSetting.findUnique({
-        where: { id: "singleton" },
-      }),
-    ]);
+    await prisma.publishJob.update({
+      where: {
+        id: jobId,
+      },
+      data: {
+        status: "PROCESSING",
+        startedAt,
+        errorMessage: null,
+      },
+    });
+
+    await log(jobId, "شروع پردازش انتشار...");
+
+    const [products, sellers, categories, settings] =
+      await Promise.all([
+        getPublicProducts(jobId),
+        getPublicSellers(),
+        getPublicCategories(),
+        prisma.platformSetting.findUnique({
+          where: {
+            id: "singleton",
+          },
+        }),
+      ]);
 
     await log(
       jobId,
       `تولید داده استاتیک: ${products.length} محصول، ${sellers.length} فروشنده، ${categories.length} دسته‌بندی فعال.`
     );
 
+    /*
+     * The publish snapshot is intentionally written as separate public
+     * JSON files so the frontend can cache/load them independently.
+     *
+     * Assets themselves are not copied into the repository.
+     */
     let lastCommitSha: string | null = null;
 
-    /*
-     * Products
-     */
     lastCommitSha = await upsertFile(
       `${PUBLIC_DATA_DIR}/products.json`,
       JSON.stringify(products, null, 2),
       `chore(publish): update products.json [job ${jobId}]`
     );
 
-    /*
-     * Sellers
-     */
     lastCommitSha = await upsertFile(
       `${PUBLIC_DATA_DIR}/sellers.json`,
       JSON.stringify(sellers, null, 2),
       `chore(publish): update sellers.json [job ${jobId}]`
     );
 
-    /*
-     * Categories
-     *
-     * Only active categories are published.
-     */
     lastCommitSha = await upsertFile(
       `${PUBLIC_DATA_DIR}/categories.json`,
       JSON.stringify(categories, null, 2),
       `chore(publish): update categories.json [job ${jobId}]`
     );
 
-    /*
-     * Platform settings
-     */
     lastCommitSha = await upsertFile(
       `${PUBLIC_DATA_DIR}/settings.json`,
-      JSON.stringify(settings, null, 2),
+      JSON.stringify(settings ?? {}, null, 2),
       `chore(publish): update settings.json [job ${jobId}]`
     );
 
@@ -195,22 +194,40 @@ async function processPublishJob(jobId: string) {
       `انتشار در GitHub موفق بود. آخرین commit: ${lastCommitSha}`
     );
 
-    const job = await prisma.publishJob.findUnique({
-      where: { id: jobId },
+    const completedJob = await prisma.publishJob.findUnique({
+      where: {
+        id: jobId,
+      },
+      select: {
+        id: true,
+        productId: true,
+        sellerId: true,
+      },
     });
 
     /*
-     * Mark the triggering product as published only after
-     * the public catalog has successfully been committed.
+     * Only mark the triggering product as PUBLISHED after the complete
+     * public snapshot has been successfully generated.
+     *
+     * A product explicitly hidden by the user must never be silently
+     * changed back to PUBLISHED.
      */
-    if (job?.productId) {
+    if (completedJob?.productId) {
       const product = await prisma.product.findUnique({
-        where: { id: job.productId },
+        where: {
+          id: completedJob.productId,
+        },
+        select: {
+          id: true,
+          visibility: true,
+        },
       });
 
-      if (product?.visibility !== "HIDDEN") {
+      if (product && product.visibility !== "HIDDEN") {
         await prisma.product.update({
-          where: { id: job.productId },
+          where: {
+            id: product.id,
+          },
           data: {
             visibility: "PUBLISHED",
             hasUnpublishedChanges: false,
@@ -221,40 +238,51 @@ async function processPublishJob(jobId: string) {
     }
 
     await prisma.publishJob.update({
-      where: { id: jobId },
+      where: {
+        id: jobId,
+      },
       data: {
         status: "SUCCESS",
         commitSha: lastCommitSha,
         finishedAt: new Date(),
+        errorMessage: null,
       },
     });
 
-    /*
-     * Audit log
-     */
-    if (job) {
-      await prisma.auditLog.create({
-        data: {
-          sellerId: job.sellerId,
-          productId: job.productId,
-          action: "PRODUCT_PUBLISHED",
-          entity: "PublishJob",
-          entityId: job.id,
-          metadata: serializeJson({
-            commitSha: lastCommitSha,
-          }),
-        },
-      });
+    if (completedJob) {
+      try {
+        await prisma.auditLog.create({
+          data: {
+            sellerId: completedJob.sellerId,
+            productId: completedJob.productId,
+            action: "PRODUCT_PUBLISHED",
+            entity: "PublishJob",
+            entityId: completedJob.id,
+            metadata: serializeJson({
+              commitSha: lastCommitSha,
+              publishedAt: new Date().toISOString(),
+            }),
+          },
+        });
+      } catch (auditError) {
+        logger.error(
+          {
+            err: auditError,
+            jobId,
+          },
+          "publish succeeded but audit log failed"
+        );
+      }
     }
-  } catch (err) {
+  } catch (error) {
     const message =
-      err instanceof Error
-        ? err.message
+      error instanceof Error
+        ? error.message
         : "خطای نامشخص در انتشار.";
 
     logger.error(
       {
-        err,
+        err: error,
         jobId,
       },
       "publish job failed"
@@ -262,14 +290,26 @@ async function processPublishJob(jobId: string) {
 
     await log(jobId, message, "error");
 
-    await prisma.publishJob.update({
-      where: { id: jobId },
-      data: {
-        status: "FAILED",
-        errorMessage: message,
-        finishedAt: new Date(),
-      },
-    });
+    try {
+      await prisma.publishJob.update({
+        where: {
+          id: jobId,
+        },
+        data: {
+          status: "FAILED",
+          errorMessage: message,
+          finishedAt: new Date(),
+        },
+      });
+    } catch (updateError) {
+      logger.error(
+        {
+          err: updateError,
+          jobId,
+        },
+        "failed to mark publish job as FAILED"
+      );
+    }
   }
 }
 
@@ -280,16 +320,20 @@ async function processPublishJob(jobId: string) {
 /**
  * Generates the complete public product catalog.
  *
- * Only products belonging to active sellers with active subscriptions
- * are exposed.
+ * A product is publicly exposed only when:
  *
- * Products connected to inactive categories remain publishable, but their
- * public category is returned as null. This keeps the public catalog
- * consistent with the active-category list.
+ * - it is PUBLISHED, or it is the current publish trigger;
+ * - its seller is active;
+ * - its seller has an active, non-expired subscription.
+ *
+ * Products can remain published while their category becomes inactive.
+ * In that case their public category becomes null.
  */
 async function getPublicProducts(jobId: string) {
   const job = await prisma.publishJob.findUnique({
-    where: { id: jobId },
+    where: {
+      id: jobId,
+    },
     select: {
       productId: true,
     },
@@ -297,22 +341,21 @@ async function getPublicProducts(jobId: string) {
 
   const triggeringProduct = job?.productId
     ? await prisma.product.findUnique({
-        where: { id: job.productId },
+        where: {
+          id: job.productId,
+        },
         select: {
           visibility: true,
         },
       })
     : null;
 
-  /*
-   * When publishing a product, allow the triggering product to enter
-   * the public snapshot before its database visibility is flipped to
-   * PUBLISHED.
-   */
   const includeTriggeringProduct = Boolean(
     job?.productId &&
       triggeringProduct?.visibility !== "HIDDEN"
   );
+
+  const now = new Date();
 
   const products = await prisma.product.findMany({
     where: {
@@ -335,8 +378,11 @@ async function getPublicProducts(jobId: string) {
         subscriptions: {
           some: {
             status: "ACTIVE",
+            startDate: {
+              lte: now,
+            },
             endDate: {
-              gte: new Date(),
+              gte: now,
             },
           },
         },
@@ -367,62 +413,43 @@ async function getPublicProducts(jobId: string) {
         },
       },
     },
+
+    orderBy: [
+      {
+        publishedAt: "desc",
+      },
+      {
+        createdAt: "desc",
+      },
+    ],
   });
 
-  const result = [];
+  return products.map((product) => {
+    const images = product.images.map((image) => ({
+      url: image.url,
+      isPrimary: image.isPrimary,
+    }));
 
-  for (const product of products) {
-    /*
-     * Images
-     *
-     * Images keep their existing URL/storage mechanism for now.
-     * Only 3D model binaries are moved to GitHub Releases.
-     */
-    const images = [];
+    const models = product.models.map((model) => ({
+      kind: model.kind,
+      url: model.url,
+    }));
 
-    for (const image of product.images) {
-      images.push({
-        url: image.url,
-        isPrimary: image.isPrimary,
-      });
-    }
-
-    /*
-     * 3D models
-     */
-    const models = [];
-
-    for (const model of product.models) {
-      const url = model.url;
-
-      models.push({
-        kind: model.kind,
-        url,
-      });
-    }
-
-    /*
-     * Inactive categories are intentionally hidden from the public
-     * catalog. The product itself can still remain public.
-     */
     const category =
-      product.category &&
-      product.category.isActive
+      product.category?.isActive
         ? {
             slug: product.category.slug,
             name: product.category.name,
           }
         : null;
 
-    result.push({
+    return {
       id: product.id,
       slug: product.slug,
       name: product.name,
 
-      shortDescription:
-        product.shortDescription,
-      fullDescription:
-        product.fullDescription,
+      shortDescription: product.shortDescription,
+      fullDescription: product.fullDescription,
 
       tags:
         product.tags
@@ -446,21 +473,15 @@ async function getPublicProducts(jobId: string) {
         product.depthMm
           ? {
               widthM: product.widthMm
-                ? millimetersToMeters(
-                    product.widthMm
-                  )
+                ? millimetersToMeters(product.widthMm)
                 : null,
 
               heightM: product.heightMm
-                ? millimetersToMeters(
-                    product.heightMm
-                  )
+                ? millimetersToMeters(product.heightMm)
                 : null,
 
               depthM: product.depthMm
-                ? millimetersToMeters(
-                    product.depthMm
-                  )
+                ? millimetersToMeters(product.depthMm)
                 : null,
 
               realWorldScale: true,
@@ -468,18 +489,18 @@ async function getPublicProducts(jobId: string) {
           : null,
 
       publishedAt: product.publishedAt,
-    });
-  }
-
-  return result;
+    };
+  });
 }
 
 /**
- * Generates the public seller catalog.
+ * Generates the public seller/store catalog.
  *
- * Only active sellers with active subscriptions are exposed.
+ * Only active sellers with a currently active subscription are exposed.
  */
 async function getPublicSellers() {
+  const now = new Date();
+
   const sellers = await prisma.seller.findMany({
     where: {
       isActive: true,
@@ -487,11 +508,18 @@ async function getPublicSellers() {
       subscriptions: {
         some: {
           status: "ACTIVE",
+          startDate: {
+            lte: now,
+          },
           endDate: {
-            gte: new Date(),
+            gte: now,
           },
         },
       },
+    },
+
+    orderBy: {
+      storeName: "asc",
     },
   });
 
@@ -512,10 +540,10 @@ async function getPublicSellers() {
 /**
  * Generates the public category catalog.
  *
- * Only active categories are exposed publicly.
+ * Only active categories are published.
  *
- * The explicit isActive:true value is included in the public
- * contract so the frontend can safely validate stale/cached data.
+ * isActive is intentionally included in the public contract so the
+ * frontend can safely handle stale/cached JSON.
  */
 async function getPublicCategories() {
   return prisma.category.findMany({
@@ -544,19 +572,31 @@ async function getPublicCategories() {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Forces a full re-publish for a seller.
+ * Forces a full public snapshot regeneration for a seller.
  *
- * This is useful when a subscription expires or changes state.
- * Data remains in the database; the public snapshot simply excludes
- * sellers/products that are no longer eligible for publication.
+ * The seller's database records are retained. Eligibility for the public
+ * catalog is determined during snapshot generation.
  */
 export async function republishForSeller(
   sellerId: string,
   triggeredByUserId: string
 ) {
+  const seller = await prisma.seller.findUnique({
+    where: {
+      id: sellerId,
+    },
+    select: {
+      id: true,
+    },
+  });
+
+  if (!seller) {
+    throw new HttpError(404, "فروشنده یافت نشد.");
+  }
+
   const job = await prisma.publishJob.create({
     data: {
-      sellerId,
+      sellerId: seller.id,
       triggeredById: triggeredByUserId,
       status: "QUEUED",
     },
@@ -568,7 +608,7 @@ export async function republishForSeller(
 }
 
 /**
- * Kept for compatibility with existing unpublish code.
+ * Kept for compatibility with existing unpublish integrations.
  */
 export {
   deleteFile as _deleteFileForUnpublish,
