@@ -26,7 +26,9 @@ type ListQuery =
 async function assertCategoryCanBeUsed(
   categoryId: string | undefined
 ): Promise<void> {
-  if (!categoryId) return;
+  if (!categoryId) {
+    return;
+  }
 
   const category =
     await prisma.category.findUnique({
@@ -73,11 +75,10 @@ function buildDimensions(
   }
 ) {
   /*
-   * Dimensions are only changed when the caller explicitly supplies
+   * Dimensions are changed only when the caller explicitly supplies
    * a unit and at least one dimension.
    *
-   * This prevents unrelated product edits from accidentally clearing
-   * existing dimensions.
+   * This prevents unrelated product edits from clearing dimensions.
    */
   if (
     !input.unit ||
@@ -115,8 +116,30 @@ function buildDimensions(
           )
         : existing?.depthMm ?? null,
 
-    inputUnit: input.unit,
+    inputUnit:
+      input.unit,
   };
+}
+
+function isSubscriptionCurrentlyActive(
+  subscription: {
+    status: string;
+    startDate: Date;
+    endDate: Date;
+    plan?: {
+      isActive?: boolean;
+    } | null;
+  },
+  now = new Date()
+): boolean {
+  return (
+    subscription.status === "ACTIVE" &&
+    subscription.startDate.getTime() <=
+      now.getTime() &&
+    subscription.endDate.getTime() >=
+      now.getTime() &&
+    subscription.plan?.isActive !== false
+  );
 }
 
 /* -------------------------------------------------------------------------- */
@@ -129,7 +152,10 @@ export async function listProducts(
     publicOnly: boolean;
   }
 ) {
-  const where: Record<string, unknown> = {};
+  const andConditions: Record<
+    string,
+    unknown
+  >[] = [];
 
   if (opts.publicOnly) {
     /*
@@ -137,73 +163,106 @@ export async function listProducts(
      *
      * - product must be PUBLISHED
      * - seller must be active
-     * - seller must have an active subscription
-     * - category must either be empty OR active
-     *
-     * The public storefront normally consumes the generated static
-     * catalog, but this keeps the API contract correct as well.
+     * - seller must have a currently active subscription
+     * - subscription plan must be active
+     * - category must either be empty or active
      */
-    where.visibility = "PUBLISHED";
+    andConditions.push({
+      visibility: "PUBLISHED",
+    });
 
-    where.seller = {
-      isActive: true,
+    andConditions.push({
+      seller: {
+        isActive: true,
 
-      subscriptions: {
-        some: {
-          status: "ACTIVE",
-          endDate: {
-            gte: new Date(),
+        subscriptions: {
+          some: {
+            status: "ACTIVE",
+
+            startDate: {
+              lte: new Date(),
+            },
+
+            endDate: {
+              gte: new Date(),
+            },
+
+            plan: {
+              is: {
+                isActive: true,
+              },
+            },
           },
         },
       },
-    };
+    });
 
-    where.OR = [
-      {
-        categoryId: null,
-      },
-      {
-        category: {
-          isActive: true,
+    andConditions.push({
+      OR: [
+        {
+          categoryId: null,
         },
-      },
-    ];
+        {
+          category: {
+            isActive: true,
+          },
+        },
+      ],
+    });
   } else {
     if (query.visibility) {
-      where.visibility =
-        query.visibility;
+      andConditions.push({
+        visibility:
+          query.visibility,
+      });
     }
 
     if (query.sellerId) {
-      where.sellerId =
-        query.sellerId;
+      andConditions.push({
+        sellerId:
+          query.sellerId,
+      });
     }
   }
 
   if (query.categoryId) {
-    where.categoryId =
-      query.categoryId;
+    andConditions.push({
+      categoryId:
+        query.categoryId,
+    });
   }
 
   if (query.search) {
-    where.OR = [
-      {
-        name: {
-          contains: query.search,
+    andConditions.push({
+      OR: [
+        {
+          name: {
+            contains:
+              query.search,
+          },
         },
-      },
-      {
-        shortDescription: {
-          contains: query.search,
+        {
+          shortDescription: {
+            contains:
+              query.search,
+          },
         },
-      },
-      {
-        tags: {
-          contains: query.search,
+        {
+          tags: {
+            contains:
+              query.search,
+          },
         },
-      },
-    ];
+      ],
+    });
   }
+
+  const where =
+    andConditions.length === 0
+      ? {}
+      : {
+          AND: andConditions,
+        };
 
   const orderBy =
     query.sort === "alphabetical"
@@ -211,7 +270,8 @@ export async function listProducts(
           name: "asc" as const,
         }
       : {
-          createdAt: "desc" as const,
+          createdAt:
+            "desc" as const,
         };
 
   const [
@@ -220,18 +280,21 @@ export async function listProducts(
   ] = await Promise.all([
     prisma.product.findMany({
       where,
+
       orderBy,
 
       skip:
         (query.page - 1) *
         query.pageSize,
 
-      take: query.pageSize,
+      take:
+        query.pageSize,
 
       include: {
         images: {
           orderBy: {
-            sortOrder: "asc",
+            sortOrder:
+              "asc",
           },
           take: 1,
         },
@@ -264,7 +327,8 @@ export async function listProducts(
     items,
     total,
     page: query.page,
-    pageSize: query.pageSize,
+    pageSize:
+      query.pageSize,
   };
 }
 
@@ -284,7 +348,8 @@ export async function getProductById(
       include: {
         images: {
           orderBy: {
-            sortOrder: "asc",
+            sortOrder:
+              "asc",
           },
         },
 
@@ -346,7 +411,8 @@ export async function createProduct(
 
       slug,
 
-      name: input.name,
+      name:
+        input.name,
 
       shortDescription:
         input.shortDescription,
@@ -357,11 +423,14 @@ export async function createProduct(
       categoryId:
         input.categoryId,
 
-      tags: input.tags,
+      tags:
+        input.tags,
 
-      visibility: "DRAFT",
+      visibility:
+        "DRAFT",
 
-      hasUnpublishedChanges: false,
+      hasUnpublishedChanges:
+        false,
 
       ...dims,
     },
@@ -392,11 +461,11 @@ export async function updateProduct(
 
   /*
    * Category changes are validated server-side.
-   * The frontend filter is only a UX convenience and must never be
-   * treated as a security/business-rule boundary.
+   * Frontend filtering is only a UX convenience.
    */
   if (
-    input.categoryId !== undefined
+    input.categoryId !==
+    undefined
   ) {
     await assertCategoryCanBeUsed(
       input.categoryId
@@ -406,41 +475,53 @@ export async function updateProduct(
   const dims =
     buildDimensions(
       {
-        width: input.width,
-        height: input.height,
-        depth: input.depth,
-        unit: input.unit,
+        width:
+          input.width,
+        height:
+          input.height,
+        depth:
+          input.depth,
+        unit:
+          input.unit,
       },
       {
-        widthMm: existing.widthMm,
+        widthMm:
+          existing.widthMm,
         heightMm:
           existing.heightMm,
-        depthMm: existing.depthMm,
+        depthMm:
+          existing.depthMm,
         inputUnit:
           existing.inputUnit,
       }
     );
 
   /*
-   * Any meaningful edit to an already-published product creates a new
-   * unpublished version.
+   * Any meaningful content edit to an already published product
+   * creates an unpublished version.
    *
-   * The public snapshot is NOT modified until the seller explicitly
-   * calls POST /api/products/:id/publish.
+   * The public snapshot is not modified until the explicit publish
+   * operation is executed.
    */
   const hasContentChanges =
-    input.name !== undefined ||
+    input.name !==
+      undefined ||
     input.shortDescription !==
       undefined ||
     input.fullDescription !==
       undefined ||
     input.categoryId !==
       undefined ||
-    input.tags !== undefined ||
-    input.width !== undefined ||
-    input.height !== undefined ||
-    input.depth !== undefined ||
-    input.unit !== undefined;
+    input.tags !==
+      undefined ||
+    input.width !==
+      undefined ||
+    input.height !==
+      undefined ||
+    input.depth !==
+      undefined ||
+    input.unit !==
+      undefined;
 
   const hasUnpublishedChanges =
     existing.visibility ===
@@ -450,12 +531,8 @@ export async function updateProduct(
       : existing.hasUnpublishedChanges;
 
   /*
-   * Visibility rules:
-   *
-   * - PUBLISHED is impossible through this service because the validator
-   *   rejects it.
-   * - HIDDEN is allowed.
-   * - If visibility is omitted, keep the existing state.
+   * PUBLISHED should only be reached through the dedicated publish
+   * flow. The validator normally prevents direct publication.
    */
   const nextVisibility =
     input.visibility ??
@@ -490,7 +567,8 @@ export async function updateProduct(
           : existing.categoryId,
 
       tags:
-        input.tags !== undefined
+        input.tags !==
+        undefined
           ? input.tags
           : existing.tags,
 
@@ -531,15 +609,16 @@ export async function deleteProduct(
   }
 
   /*
-   * Best-effort cleanup of stored files.
-   *
+   * Best-effort storage cleanup.
    * Database deletion remains authoritative.
    */
   await Promise.all([
     ...product.images.map(
       (image) =>
         storage
-          .delete(image.storageKey)
+          .delete(
+            image.storageKey
+          )
           .catch(
             () => undefined
           )
@@ -548,7 +627,9 @@ export async function deleteProduct(
     ...product.models.map(
       (model) =>
         storage
-          .delete(model.storageKey)
+          .delete(
+            model.storageKey
+          )
           .catch(
             () => undefined
           )
@@ -569,15 +650,28 @@ export async function deleteProduct(
 async function enforceProductLimit(
   sellerId: string
 ): Promise<void> {
+  const now = new Date();
+
   const activeSub =
     await prisma.subscription.findFirst({
       where: {
         sellerId,
 
-        status: "ACTIVE",
+        status:
+          "ACTIVE",
+
+        startDate: {
+          lte: now,
+        },
 
         endDate: {
-          gte: new Date(),
+          gte: now,
+        },
+
+        plan: {
+          is: {
+            isActive: true,
+          },
         },
       },
 
@@ -586,7 +680,8 @@ async function enforceProductLimit(
       },
 
       orderBy: {
-        endDate: "desc",
+        endDate:
+          "desc",
       },
     });
 
@@ -598,7 +693,9 @@ async function enforceProductLimit(
   }
 
   if (
-    activeSub.plan.productLimit
+    activeSub.plan
+      .productLimit !==
+    null
   ) {
     const count =
       await prisma.product.count({
@@ -609,7 +706,8 @@ async function enforceProductLimit(
 
     if (
       count >=
-      activeSub.plan.productLimit
+      activeSub.plan
+        .productLimit
     ) {
       throw new HttpError(
         403,
@@ -626,8 +724,7 @@ async function enforceProductLimit(
 /**
  * Confirms that a seller is currently eligible to publish.
  *
- * This is intentionally separate from product editing.
- * Editing and publishing are two different business operations.
+ * Editing and publishing remain separate business operations.
  */
 export async function assertSellerCanPublish(
   sellerId: string
@@ -636,6 +733,10 @@ export async function assertSellerCanPublish(
     await prisma.seller.findUnique({
       where: {
         id: sellerId,
+      },
+      select: {
+        id: true,
+        isActive: true,
       },
     });
 
@@ -649,20 +750,51 @@ export async function assertSellerCanPublish(
     );
   }
 
+  const now = new Date();
+
   const activeSub =
     await prisma.subscription.findFirst({
       where: {
         sellerId,
 
-        status: "ACTIVE",
+        status:
+          "ACTIVE",
+
+        startDate: {
+          lte: now,
+        },
 
         endDate: {
-          gte: new Date(),
+          gte: now,
+        },
+
+        plan: {
+          is: {
+            isActive: true,
+          },
+        },
+      },
+
+      select: {
+        id: true,
+        status: true,
+        startDate: true,
+        endDate: true,
+        plan: {
+          select: {
+            isActive: true,
+          },
         },
       },
     });
 
-  if (!activeSub) {
+  if (
+    !activeSub ||
+    !isSubscriptionCurrentlyActive(
+      activeSub,
+      now
+    )
+  ) {
     throw new HttpError(
       403,
       "اشتراک فعال برای انتشار لازم است."
