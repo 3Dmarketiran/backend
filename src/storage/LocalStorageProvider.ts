@@ -1,96 +1,251 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 import { nanoid } from "nanoid";
 import type { StorageProvider, StoredFile } from "./StorageProvider";
 import { env } from "../config/env";
 
-const UPLOAD_ROOT = path.resolve(process.cwd(), "uploads");
+const DEFAULT_UPLOAD_ROOT = path.resolve(process.cwd(), "uploads");
 
-/**
- * Development-friendly local filesystem storage provider.
- *
- * This provider is intended for local development/testing only.
- * Production storage is enforced through storage/index.ts and must use
- * an S3-compatible provider.
- *
- * Files are served by the backend static route:
- *
- *   /files/*
- *
- * Example logical storage key:
- *
- *   products/{productId}/images/{generated-file-id}.webp
- */
+const SAFE_SEGMENT = /^[a-zA-Z0-9._-]+$/;
+
+function normalizeSlashes(value: string): string {
+  return value.replace(/\\/g, "/");
+}
+
+function assertSafeSegment(value: string, fieldName: string): void {
+  if (
+    !value ||
+    value === "." ||
+    value === ".." ||
+    value.includes("/") ||
+    value.includes("\\") ||
+    !SAFE_SEGMENT.test(value)
+  ) {
+    throw new Error(`Invalid ${fieldName}.`);
+  }
+}
+
+function sanitizeFilename(filename: string): string {
+  const normalized = normalizeSlashes(filename).split("/").pop() || "";
+
+  const ext = path.extname(normalized).toLowerCase();
+  const base = path.basename(normalized, path.extname(normalized));
+
+  const safeBase = base
+    .normalize("NFKC")
+    .replace(/[^\p{L}\p{N}\-_ ]/gu, "_")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[-_.]+|[-_.]+$/g, "")
+    .slice(0, 120);
+
+  const finalBase = safeBase || "file";
+
+  return `${finalBase}${ext}`;
+}
+
+function sanitizeStorageKey(value: string): string {
+  const normalized = normalizeSlashes(value).replace(/^\/+|\/+$/g, "");
+
+  if (!normalized) {
+    throw new Error("Storage key cannot be empty.");
+  }
+
+  const parts = normalized.split("/");
+
+  for (const part of parts) {
+    if (!part || part === "." || part === "..") {
+      throw new Error("Invalid storage key.");
+    }
+
+    if (!SAFE_SEGMENT.test(part)) {
+      throw new Error("Storage key contains an invalid path segment.");
+    }
+  }
+
+  return parts.join("/");
+}
+
+function safeResolve(root: string, storageKey: string): string {
+  const absoluteRoot = path.resolve(root);
+  const absolutePath = path.resolve(absoluteRoot, storageKey);
+
+  if (
+    absolutePath !== absoluteRoot &&
+    !absolutePath.startsWith(`${absoluteRoot}${path.sep}`)
+  ) {
+    throw new Error("Invalid storage path.");
+  }
+
+  return absolutePath;
+}
+
+function extensionOf(filename: string): string {
+  return path.extname(filename).toLowerCase();
+}
+
+function createRandomFilename(originalFilename: string): string {
+  const ext = extensionOf(originalFilename);
+  const randomPart = `${Date.now().toString(36)}-${randomBytes(10).toString("hex")}-${nanoid(8)}`;
+
+  return `${randomPart}${ext}`;
+}
+
 export class LocalStorageProvider implements StorageProvider {
+  private readonly root: string;
+
+  constructor() {
+    this.root = DEFAULT_UPLOAD_ROOT;
+  }
+
+  private async ensureRoot(): Promise<void> {
+    await fs.mkdir(this.root, {
+      recursive: true,
+    });
+  }
+
+  private buildStorageKey(
+    folder: string,
+    filename: string,
+    explicitStorageKey?: string
+  ): string {
+    if (explicitStorageKey) {
+      return sanitizeStorageKey(explicitStorageKey);
+    }
+
+    const safeFolder = sanitizeStorageKey(folder);
+    const safeFilename = sanitizeFilename(filename);
+
+    return `${safeFolder}/${createRandomFilename(safeFilename)}`;
+  }
+
+  private publicUrl(storageKey: string): string {
+    const encodedPath = storageKey
+      .split("/")
+      .map((segment) => encodeURIComponent(segment))
+      .join("/");
+
+    const baseUrl = env.PUBLIC_ASSET_BASE_URL.replace(/\/+$/, "");
+
+    return `${baseUrl}/${encodedPath}`;
+  }
+
   async save(params: {
     folder: string;
     filename: string;
     buffer: Buffer;
     contentType: string;
+    storageKey?: string;
   }): Promise<StoredFile> {
-    if (!params.buffer || params.buffer.length === 0) {
+    await this.ensureRoot();
+
+    if (!Buffer.isBuffer(params.buffer)) {
+      throw new Error("Storage save requires a Buffer.");
+    }
+
+    if (params.buffer.length === 0) {
       throw new Error("Cannot store an empty file.");
     }
 
-    const relDir = sanitizePath(params.folder);
+    const storageKey = this.buildStorageKey(
+      params.folder,
+      params.filename,
+      params.storageKey
+    );
 
-    if (!relDir) {
-      throw new Error("Storage folder is required.");
-    }
+    const destination = safeResolve(this.root, storageKey);
 
-    const extension = getSafeExtension(params.filename);
-    const safeName = `${nanoid(16)}${extension}`;
-
-    const storageKey = path.posix.join(relDir, safeName);
-    const absPath = resolveStoragePath(storageKey);
-
-    await fs.mkdir(path.dirname(absPath), {
+    await fs.mkdir(path.dirname(destination), {
       recursive: true,
     });
 
-    await fs.writeFile(absPath, params.buffer);
+    try {
+      await fs.writeFile(destination, params.buffer, {
+        flag: "wx",
+      });
+    } catch (error: any) {
+      if (error?.code === "EEXIST") {
+        throw new Error("Storage key already exists.");
+      }
+
+      throw error;
+    }
 
     return {
       storageKey,
-      url: buildFileUrl(storageKey),
-      sizeBytes: params.buffer.byteLength,
+      url: this.publicUrl(storageKey),
+      sizeBytes: params.buffer.length,
     };
   }
 
   async delete(storageKey: string): Promise<void> {
-    const safeKey = sanitizePath(storageKey);
+    const safeKey = sanitizeStorageKey(storageKey);
+    const target = safeResolve(this.root, safeKey);
 
-    if (!safeKey) {
-      return;
+    try {
+      await fs.unlink(target);
+    } catch (error: any) {
+      if (error?.code === "ENOENT") {
+        return;
+      }
+
+      throw error;
     }
 
-    const absPath = resolveStoragePath(safeKey);
+    await this.removeEmptyParentDirectories(path.dirname(target));
+  }
 
-    await fs.rm(absPath, {
-      force: true,
-    });
+  private async removeEmptyParentDirectories(startDirectory: string): Promise<void> {
+    const root = path.resolve(this.root);
+    let current = path.resolve(startDirectory);
+
+    while (
+      current !== root &&
+      current.startsWith(`${root}${path.sep}`)
+    ) {
+      try {
+        const entries = await fs.readdir(current);
+
+        if (entries.length > 0) {
+          break;
+        }
+
+        await fs.rmdir(current);
+        current = path.dirname(current);
+      } catch (error: any) {
+        if (error?.code === "ENOENT") {
+          break;
+        }
+
+        if (error?.code === "ENOTEMPTY") {
+          break;
+        }
+
+        throw error;
+      }
+    }
   }
 
   async getUrl(storageKey: string): Promise<string> {
-    const safeKey = sanitizePath(storageKey);
+    const safeKey = sanitizeStorageKey(storageKey);
 
-    if (!safeKey) {
-      throw new Error("Storage key is required.");
+    const target = safeResolve(this.root, safeKey);
+
+    try {
+      await fs.access(target);
+    } catch {
+      throw new Error("Stored file not found.");
     }
 
-    return buildFileUrl(safeKey);
+    return this.publicUrl(safeKey);
   }
 
   async read(storageKey: string): Promise<Buffer> {
-    const safeKey = sanitizePath(storageKey);
+    const safeKey = sanitizeStorageKey(storageKey);
+    const target = safeResolve(this.root, safeKey);
 
-    if (!safeKey) {
-      throw new Error("Storage key is required.");
-    }
-
-    const absPath = resolveStoragePath(safeKey);
-
-    return fs.readFile(absPath);
+    return fs.readFile(target);
   }
 
   async healthCheck(): Promise<{
@@ -98,16 +253,42 @@ export class LocalStorageProvider implements StorageProvider {
     message?: string;
   }> {
     try {
-      await fs.mkdir(UPLOAD_ROOT, {
+      await this.ensureRoot();
+
+      await fs.access(this.root);
+
+      const testDirectory = path.join(
+        this.root,
+        ".healthcheck"
+      );
+
+      await fs.mkdir(testDirectory, {
         recursive: true,
       });
 
-      await fs.access(UPLOAD_ROOT);
+      const testFile = path.join(
+        testDirectory,
+        `${Date.now()}-${nanoid(6)}.tmp`
+      );
+
+      await fs.writeFile(testFile, "ok", {
+        encoding: "utf8",
+        flag: "wx",
+      });
+
+      await fs.unlink(testFile);
+
+      try {
+        await fs.rmdir(testDirectory);
+      } catch {
+        // Another process may have recreated/populated the directory.
+      }
 
       return {
         ok: true,
+        message: "Local storage is healthy.",
       };
-    } catch (error) {
+    } catch (error: any) {
       return {
         ok: false,
         message:
@@ -119,88 +300,4 @@ export class LocalStorageProvider implements StorageProvider {
   }
 }
 
-/**
- * Resolve a storage key against the upload root and verify that the final
- * path remains inside that root.
- *
- * This is defense-in-depth against path traversal.
- */
-function resolveStoragePath(storageKey: string): string {
-  const normalizedKey = sanitizePath(storageKey);
-
-  if (!normalizedKey) {
-    throw new Error("Invalid storage path.");
-  }
-
-  const resolvedRoot = path.resolve(UPLOAD_ROOT);
-  const resolvedPath = path.resolve(
-    resolvedRoot,
-    ...normalizedKey.split("/")
-  );
-
-  const rootWithSeparator = `${resolvedRoot}${path.sep}`;
-
-  if (
-    resolvedPath !== resolvedRoot &&
-    !resolvedPath.startsWith(rootWithSeparator)
-  ) {
-    throw new Error(
-      "Invalid storage path (path traversal attempt blocked)."
-    );
-  }
-
-  return resolvedPath;
-}
-
-/**
- * Normalize a logical storage path.
- *
- * Both "/" and "\" are treated as path separators so a Windows-style
- * traversal cannot bypass validation.
- */
-function sanitizePath(input: string): string {
-  return input
-    .replace(/\\/g, "/")
-    .split("/")
-    .filter(
-      (segment) =>
-        segment !== "" &&
-        segment !== "." &&
-        segment !== ".."
-    )
-    .map((segment) =>
-      segment.replace(/[^a-zA-Z0-9._-]/g, "-")
-    )
-    .filter(Boolean)
-    .join("/");
-}
-
-function getSafeExtension(filename: string): string {
-  const extension = path.extname(filename).toLowerCase();
-
-  if (!extension) {
-    return "";
-  }
-
-  const sanitized = extension.replace(/[^a-z0-9.]/g, "");
-
-  if (!sanitized.startsWith(".")) {
-    return "";
-  }
-
-  return sanitized;
-}
-
-function buildFileUrl(storageKey: string): string {
-  const baseUrl = (
-    env.API_URL ??
-    `http://localhost:${env.PORT}`
-  ).replace(/\/+$/, "");
-
-  const encodedKey = storageKey
-    .split("/")
-    .map((segment) => encodeURIComponent(segment))
-    .join("/");
-
-  return `${baseUrl}/files/${encodedKey}`;
-}
+export default LocalStorageProvider;
