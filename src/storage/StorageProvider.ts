@@ -1,24 +1,42 @@
 /**
- * StorageProvider abstraction (spec section 5).
+ * StorageProvider abstraction.
  *
- * The rest of the application NEVER touches the filesystem or an S3 SDK
- * directly — it only calls these methods. This means switching from local
- * disk (dev) to S3-compatible object storage (production) is a one-line
- * change in config/storage.ts, not a rewrite.
+ * The rest of the application never touches the filesystem or an S3 SDK
+ * directly. It only communicates through this interface.
+ *
+ * Development can use local disk storage while production can use an
+ * S3-compatible object storage provider without changing application
+ * services.
  */
+
 export interface StoredFile {
-  /** Internal key/path used to address the file within the provider. */
+  /**
+   * Internal key/path used to address the file within the provider.
+   */
   storageKey: string;
-  /** Publicly reachable URL (or one the backend can serve) for this file. */
+
+  /**
+   * URL that can be returned by the API and used by the public website.
+   *
+   * Depending on the provider this may be a permanent public URL or a
+   * temporary/signed URL.
+   */
   url: string;
+
+  /**
+   * Stored file size in bytes.
+   */
   sizeBytes: number;
 }
 
 export interface StorageProvider {
   /**
-   * Persists a file buffer under a logical folder (e.g. "products/{id}/images")
-   * and returns its storage key + a URL that can be embedded in API responses
-   * and, when published, in the public static site's product JSON.
+   * Persist a file buffer under a logical folder.
+   *
+   * Example:
+   * products/{productId}/images
+   *
+   * The provider is responsible for generating the final storage key.
    */
   save(params: {
     folder: string;
@@ -27,15 +45,40 @@ export interface StorageProvider {
     contentType: string;
   }): Promise<StoredFile>;
 
-  /** Permanently deletes a previously stored file. Safe to call on a missing key. */
+  /**
+   * Permanently delete a previously stored file.
+   *
+   * Implementations should treat deletion of an already-missing object
+   * as a safe/idempotent operation whenever the underlying provider
+   * supports it.
+   */
   delete(storageKey: string): Promise<void>;
 
-  /** Resolves a storage key to a URL usable right now (may be signed/temporary for private providers). */
+  /**
+   * Resolve a storage key into a URL that can currently be used to access
+   * the asset.
+   *
+   * Public providers may return a permanent URL.
+   * Private providers may return a temporary/signed URL.
+   */
   getUrl(storageKey: string): Promise<string>;
 
-  /** Reads an existing asset so the publish pipeline can mirror it to public static hosting. */
+  /**
+   * Read an existing asset from storage.
+   *
+   * This is used by publishing workflows that need to mirror an asset
+   * to another public/static hosting layer.
+   */
   read(storageKey: string): Promise<Buffer>;
 
-  /** Lightweight connectivity check used by GET /api/health. */
-  healthCheck(): Promise<{ ok: boolean; message?: string }>;
+  /**
+   * Perform a lightweight connectivity/configuration check.
+   *
+   * This is used by the backend health endpoint and should not perform
+   * expensive operations.
+   */
+  healthCheck(): Promise<{
+    ok: boolean;
+    message?: string;
+  }>;
 }
