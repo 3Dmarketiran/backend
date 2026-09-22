@@ -12,32 +12,59 @@ import {
   serializeJson,
 } from "../utils/json";
 
-export const subscriptionsRouter = Router();
+export const subscriptionsRouter =
+  Router();
 
 // ---------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------
 
-function isValidDate(value: Date) {
-  return !Number.isNaN(value.getTime());
+function assertRouteId(
+  value: string | undefined,
+  message = "شناسه نامعتبر است."
+): string {
+  const id = value?.trim();
+
+  if (!id) {
+    throw new HttpError(400, message);
+  }
+
+  return id;
+}
+
+function isValidDate(
+  value: Date
+): boolean {
+  return !Number.isNaN(
+    value.getTime()
+  );
 }
 
 function isSubscriptionCurrentlyActive(
   status: string,
-  endDate: Date | null
-) {
-  if (status !== "ACTIVE") {
+  startDate: Date | null,
+  endDate: Date | null,
+  now = new Date()
+): boolean {
+  if (
+    status !== "ACTIVE" ||
+    !startDate ||
+    !endDate
+  ) {
     return false;
   }
 
-  if (!endDate) {
-    return false;
-  }
-
-  return endDate.getTime() >= Date.now();
+  return (
+    startDate.getTime() <=
+      now.getTime() &&
+    endDate.getTime() >=
+      now.getTime()
+  );
 }
 
-function serializePlan(plan: any) {
+function serializePlan(
+  plan: any
+) {
   return {
     ...plan,
     features: parseJson(
@@ -52,10 +79,30 @@ function serializeSubscription(
 ) {
   return {
     ...subscription,
+    isCurrentlyActive:
+      isSubscriptionCurrentlyActive(
+        subscription.status,
+        subscription.startDate,
+        subscription.endDate
+      ),
     plan: subscription.plan
-      ? serializePlan(subscription.plan)
+      ? serializePlan(
+          subscription.plan
+        )
       : undefined,
   };
+}
+
+function isPrismaErrorCode(
+  err: unknown,
+  code: string
+): boolean {
+  return (
+    err instanceof Error &&
+    "code" in err &&
+    (err as { code?: string })
+      .code === code
+  );
 }
 
 // ---------------------------------------------------------------------
@@ -67,14 +114,16 @@ subscriptionsRouter.get(
   async (_req, res, next) => {
     try {
       const plans =
-        await prisma.subscriptionPlan.findMany({
-          where: {
-            isActive: true,
-          },
-          orderBy: {
-            durationDays: "asc",
-          },
-        });
+        await prisma.subscriptionPlan.findMany(
+          {
+            where: {
+              isActive: true,
+            },
+            orderBy: {
+              durationDays: "asc",
+            },
+          }
+        );
 
       res.json({
         plans: plans.map(
@@ -87,27 +136,51 @@ subscriptionsRouter.get(
   }
 );
 
-const planSchema = z.object({
-  name: z.string().min(2).max(120),
+const planSchema =
+  z.object({
+    name: z
+      .string()
+      .trim()
+      .min(2)
+      .max(120),
 
-  durationDays:
-    z.number().int().positive(),
+    durationDays: z
+      .number()
+      .int()
+      .positive(),
 
-  price:
-    z.number().nonnegative(),
+    price: z
+      .number()
+      .nonnegative(),
 
-  discountPct:
-    z.number().min(0).max(100).optional(),
+    discountPct: z
+      .number()
+      .min(0)
+      .max(100)
+      .optional(),
 
-  features:
-    z.record(z.unknown()).optional(),
+    features: z
+      .record(z.unknown())
+      .optional(),
 
-  productLimit:
-    z.number().int().positive().nullable().optional(),
+    productLimit: z
+      .number()
+      .int()
+      .positive()
+      .nullable()
+      .optional(),
 
-  storageLimitMb:
-    z.number().int().positive().nullable().optional(),
-});
+    storageLimitMb: z
+      .number()
+      .int()
+      .positive()
+      .nullable()
+      .optional(),
+
+    isActive: z
+      .boolean()
+      .optional(),
+  });
 
 // ---------------------------------------------------------------------
 // Admin plan creation
@@ -125,26 +198,51 @@ subscriptionsRouter.post(
         );
 
       const plan =
-        await prisma.subscriptionPlan.create({
-          data: {
-            name: input.name,
-            durationDays:
-              input.durationDays,
-            price: input.price,
-            discountPct:
-              input.discountPct,
-            features:
-              serializeJson(
-                input.features
-              ),
-            productLimit:
-              input.productLimit ??
-              null,
-            storageLimitMb:
-              input.storageLimitMb ??
-              null,
-          },
-        });
+        await prisma.subscriptionPlan.create(
+          {
+            data: {
+              name: input.name,
+              durationDays:
+                input.durationDays,
+              price: input.price,
+              discountPct:
+                input.discountPct ??
+                0,
+              features:
+                serializeJson(
+                  input.features
+                ),
+              productLimit:
+                input.productLimit ??
+                null,
+              storageLimitMb:
+                input.storageLimitMb ??
+                null,
+              isActive:
+                input.isActive ??
+                true,
+            },
+          }
+        );
+
+      await prisma.auditLog.create({
+        data: {
+          actorId: req.user!.id,
+          action:
+            "SUBSCRIPTION_PLAN_CREATED",
+          entity:
+            "SubscriptionPlan",
+          entityId: plan.id,
+          metadata:
+            serializeJson({
+              name: plan.name,
+              durationDays:
+                plan.durationDays,
+              price: plan.price,
+            }),
+          ipAddress: req.ip,
+        },
+      });
 
       res.status(201).json({
         plan:
@@ -166,76 +264,128 @@ subscriptionsRouter.put(
   requireAdmin,
   async (req, res, next) => {
     try {
+      const planId =
+        assertRouteId(
+          req.params.id,
+          "شناسه پلن نامعتبر است."
+        );
+
       const input =
         planSchema
           .partial()
           .parse(req.body);
 
+      const existing =
+        await prisma.subscriptionPlan.findUnique(
+          {
+            where: {
+              id: planId,
+            },
+          }
+        );
+
+      if (!existing) {
+        throw new HttpError(
+          404,
+          "پلن یافت نشد."
+        );
+      }
+
       const plan =
-        await prisma.subscriptionPlan.update({
-          where: {
-            id: req.params.id,
-          },
+        await prisma.subscriptionPlan.update(
+          {
+            where: {
+              id: planId,
+            },
 
-          data: {
-            ...(input.name !==
-            undefined
-              ? {
-                  name: input.name,
-                }
-              : {}),
+            data: {
+              ...(input.name !==
+              undefined
+                ? {
+                    name:
+                      input.name,
+                  }
+                : {}),
 
-            ...(input.durationDays !==
-            undefined
-              ? {
-                  durationDays:
-                    input.durationDays,
-                }
-              : {}),
+              ...(input.durationDays !==
+              undefined
+                ? {
+                    durationDays:
+                      input.durationDays,
+                  }
+                : {}),
 
-            ...(input.price !==
-            undefined
-              ? {
-                  price:
-                    input.price,
-                }
-              : {}),
+              ...(input.price !==
+              undefined
+                ? {
+                    price:
+                      input.price,
+                  }
+                : {}),
 
-            ...(input.discountPct !==
-            undefined
-              ? {
-                  discountPct:
-                    input.discountPct,
-                }
-              : {}),
+              ...(input.discountPct !==
+              undefined
+                ? {
+                    discountPct:
+                      input.discountPct,
+                  }
+                : {}),
 
-            ...(input.productLimit !==
-            undefined
-              ? {
-                  productLimit:
-                    input.productLimit,
-                }
-              : {}),
+              ...(input.productLimit !==
+              undefined
+                ? {
+                    productLimit:
+                      input.productLimit,
+                  }
+                : {}),
 
-            ...(input.storageLimitMb !==
-            undefined
-              ? {
-                  storageLimitMb:
-                    input.storageLimitMb,
-                }
-              : {}),
+              ...(input.storageLimitMb !==
+              undefined
+                ? {
+                    storageLimitMb:
+                      input.storageLimitMb,
+                  }
+                : {}),
 
-            ...(input.features !==
-            undefined
-              ? {
-                  features:
-                    serializeJson(
-                      input.features
-                    ),
-                }
-              : {}),
-          },
-        });
+              ...(input.features !==
+              undefined
+                ? {
+                    features:
+                      serializeJson(
+                        input.features
+                      ),
+                  }
+                : {}),
+
+              ...(input.isActive !==
+              undefined
+                ? {
+                    isActive:
+                      input.isActive,
+                  }
+                : {}),
+            },
+          }
+        );
+
+      await prisma.auditLog.create({
+        data: {
+          actorId: req.user!.id,
+          action:
+            "SUBSCRIPTION_PLAN_UPDATED",
+          entity:
+            "SubscriptionPlan",
+          entityId: plan.id,
+          metadata:
+            serializeJson({
+              changedFields:
+                Object.keys(
+                  input
+                ),
+            }),
+          ipAddress: req.ip,
+        },
+      });
 
       res.json({
         plan:
@@ -258,7 +408,10 @@ subscriptionsRouter.get(
   async (req, res, next) => {
     try {
       const sellerId =
-        req.params.sellerId;
+        assertRouteId(
+          req.params.sellerId,
+          "شناسه فروشنده نامعتبر است."
+        );
 
       const now = new Date();
 
@@ -280,7 +433,6 @@ subscriptionsRouter.get(
               sellerId,
             },
           },
-
           _sum: {
             sizeBytes: true,
           },
@@ -292,7 +444,6 @@ subscriptionsRouter.get(
               sellerId,
             },
           },
-
           _sum: {
             sizeBytes: true,
           },
@@ -301,22 +452,22 @@ subscriptionsRouter.get(
         prisma.subscription.findFirst({
           where: {
             sellerId,
-
             status: "ACTIVE",
-
             startDate: {
               lte: now,
             },
-
             endDate: {
               gte: now,
             },
+            plan: {
+              is: {
+                isActive: true,
+              },
+            },
           },
-
           include: {
             plan: true,
           },
-
           orderBy: {
             endDate: "desc",
           },
@@ -337,7 +488,9 @@ subscriptionsRouter.get(
         activeSubscription &&
         isSubscriptionCurrentlyActive(
           activeSubscription.status,
-          activeSubscription.endDate
+          activeSubscription.startDate,
+          activeSubscription.endDate,
+          now
         )
           ? activeSubscription
           : null;
@@ -346,8 +499,8 @@ subscriptionsRouter.get(
         productCount,
 
         productLimit:
-          subscription
-            ?.plan.productLimit ??
+          subscription?.plan
+            .productLimit ??
           null,
 
         storageUsedBytes:
@@ -359,14 +512,15 @@ subscriptionsRouter.get(
           ),
 
         storageLimitMb:
-          subscription
-            ?.plan.storageLimitMb ??
+          subscription?.plan
+            .storageLimitMb ??
           null,
 
         subscription:
           subscription
             ? {
-                id: subscription.id,
+                id:
+                  subscription.id,
 
                 status:
                   subscription.status,
@@ -377,24 +531,31 @@ subscriptionsRouter.get(
                 endDate:
                   subscription.endDate,
 
+                isCurrentlyActive:
+                  true,
+
                 plan: {
                   id:
-                    subscription.plan.id,
+                    subscription
+                      .plan.id,
 
                   name:
-                    subscription.plan
-                      .name,
+                    subscription
+                      .plan.name,
 
                   durationDays:
-                    subscription.plan
+                    subscription
+                      .plan
                       .durationDays,
 
                   productLimit:
-                    subscription.plan
+                    subscription
+                      .plan
                       .productLimit,
 
                   storageLimitMb:
-                    subscription.plan
+                    subscription
+                      .plan
                       .storageLimitMb,
                 },
               }
@@ -412,17 +573,24 @@ subscriptionsRouter.get(
 
 const activateSchema =
   z.object({
-    sellerId:
-      z.string().cuid(),
+    sellerId: z
+      .string()
+      .cuid(),
 
-    planId:
-      z.string().cuid(),
+    planId: z
+      .string()
+      .cuid(),
 
-    startDate:
-      z.string().datetime().optional(),
+    startDate: z
+      .string()
+      .datetime()
+      .optional(),
 
-    notes:
-      z.string().max(1000).optional(),
+    notes: z
+      .string()
+      .trim()
+      .max(1000)
+      .optional(),
   });
 
 subscriptionsRouter.post(
@@ -436,10 +604,23 @@ subscriptionsRouter.post(
           req.body
         );
 
+      const now = new Date();
+
       const [
+        seller,
         plan,
         existingActiveSubscription,
       ] = await Promise.all([
+        prisma.seller.findUnique({
+          where: {
+            id: input.sellerId,
+          },
+          select: {
+            id: true,
+            isActive: true,
+          },
+        }),
+
         prisma.subscriptionPlan.findUnique(
           {
             where: {
@@ -453,18 +634,38 @@ subscriptionsRouter.post(
             sellerId:
               input.sellerId,
 
-            status: "ACTIVE",
+            status:
+              "ACTIVE",
+
+            startDate: {
+              lte: now,
+            },
 
             endDate: {
-              gte: new Date(),
+              gte: now,
             },
           },
 
           orderBy: {
-            endDate: "desc",
+            endDate:
+              "desc",
           },
         }),
       ]);
+
+      if (!seller) {
+        throw new HttpError(
+          404,
+          "فروشنده یافت نشد."
+        );
+      }
+
+      if (!seller.isActive) {
+        throw new HttpError(
+          409,
+          "این فروشنده غیرفعال است و نمی‌توان برای آن اشتراک فعال کرد."
+        );
+      }
 
       if (!plan) {
         throw new HttpError(
@@ -494,7 +695,7 @@ subscriptionsRouter.post(
           ? new Date(
               input.startDate
             )
-          : new Date();
+          : now;
 
       if (
         !isValidDate(
@@ -601,11 +802,17 @@ subscriptionsRouter.post(
   requireAdmin,
   async (req, res, next) => {
     try {
+      const subscriptionId =
+        assertRouteId(
+          req.params.id,
+          "شناسه اشتراک نامعتبر است."
+        );
+
       const subscription =
         await prisma.subscription.findUnique(
           {
             where: {
-              id: req.params.id,
+              id: subscriptionId,
             },
           }
         );
@@ -627,12 +834,32 @@ subscriptionsRouter.post(
         );
       }
 
+      if (
+        subscription.status ===
+        "EXPIRED"
+      ) {
+        throw new HttpError(
+          409,
+          "این اشتراک قبلاً منقضی شده است."
+        );
+      }
+
+      if (
+        subscription.status !==
+        "ACTIVE"
+      ) {
+        throw new HttpError(
+          409,
+          "این اشتراک قابل لغو نیست."
+        );
+      }
+
       const updated =
         await prisma.subscription.update(
           {
             where: {
               id:
-                req.params.id,
+                subscriptionId,
             },
 
             data: {
@@ -690,12 +917,17 @@ subscriptionsRouter.get(
   requireOwnSeller(),
   async (req, res, next) => {
     try {
+      const sellerId =
+        assertRouteId(
+          req.params.sellerId,
+          "شناسه فروشنده نامعتبر است."
+        );
+
       const subscriptions =
         await prisma.subscription.findMany(
           {
             where: {
-              sellerId:
-                req.params.sellerId,
+              sellerId,
             },
 
             include: {
@@ -726,6 +958,8 @@ subscriptionsRouter.get(
 // ---------------------------------------------------------------------
 
 export async function expireOverdueSubscriptions() {
+  const now = new Date();
+
   const result =
     await prisma.subscription.updateMany(
       {
@@ -733,7 +967,7 @@ export async function expireOverdueSubscriptions() {
           status: "ACTIVE",
 
           endDate: {
-            lt: new Date(),
+            lt: now,
           },
         },
 
@@ -746,3 +980,5 @@ export async function expireOverdueSubscriptions() {
 
   return result.count;
 }
+
+export default subscriptionsRouter;
