@@ -3,7 +3,104 @@ import { storage } from "../storage";
 import { assertValidImage, assertValidModel } from "../middleware/upload";
 import { HttpError } from "../middleware/errorHandler";
 
-export async function addProductImage(productId: string, file: Express.Multer.File) {
+async function assertUploadAllowed(
+  productId: string,
+  incomingBytes: number
+): Promise<void> {
+  const product = await prisma.product.findUnique({
+    where: { id: productId },
+    select: { sellerId: true },
+  });
+
+  if (!product) {
+    throw new HttpError(404, "محصول یافت نشد.");
+  }
+
+  const activeSub = await prisma.subscription.findFirst({
+    where: {
+      sellerId: product.sellerId,
+      status: "ACTIVE",
+      endDate: {
+        gte: new Date(),
+      },
+    },
+    include: {
+      plan: true,
+    },
+    orderBy: {
+      endDate: "desc",
+    },
+  });
+
+  if (!activeSub) {
+    throw new HttpError(
+      403,
+      "برای آپلود فایل، اشتراک فعال لازم است."
+    );
+  }
+
+  const storageLimitMb = activeSub.plan.storageLimitMb;
+
+  // اگر پلن محدودیت فضا نداشته باشد، آپلود آزاد است.
+  if (!storageLimitMb) {
+    return;
+  }
+
+  const [imageUsage, modelUsage] = await Promise.all([
+    prisma.productImage.aggregate({
+      where: {
+        product: {
+          sellerId: product.sellerId,
+        },
+      },
+      _sum: {
+        sizeBytes: true,
+      },
+    }),
+
+    prisma.productModel.aggregate({
+      where: {
+        product: {
+          sellerId: product.sellerId,
+        },
+      },
+      _sum: {
+        sizeBytes: true,
+      },
+    }),
+  ]);
+
+  const usedBytes =
+    (imageUsage._sum.sizeBytes ?? 0) +
+    (modelUsage._sum.sizeBytes ?? 0);
+
+  const limitBytes = storageLimitMb * 1024 * 1024;
+
+  if (usedBytes + incomingBytes > limitBytes) {
+    const usedMb = Math.ceil(
+      usedBytes / (1024 * 1024)
+    );
+
+    const incomingMb = Math.ceil(
+      incomingBytes / (1024 * 1024)
+    );
+
+    throw new HttpError(
+      403,
+      `فضای ذخیره‌سازی پلن شما کافی نیست. مصرف فعلی: ${usedMb}MB، فایل جدید: ${incomingMb}MB، سقف پلن: ${storageLimitMb}MB.`
+    );
+  }
+}
+
+export async function addProductImage(
+  productId: string,
+  file: Express.Multer.File
+) {
+  await assertUploadAllowed(
+    productId,
+    file.buffer.length
+  );
+
   await assertValidImage(file.buffer);
 
   const stored = await storage.save({
@@ -13,89 +110,187 @@ export async function addProductImage(productId: string, file: Express.Multer.Fi
     contentType: file.mimetype,
   });
 
-  const existingCount = await prisma.productImage.count({ where: { productId } });
+  const existingCount = await prisma.productImage.count({
+    where: { productId },
+  });
 
   const image = await prisma.productImage.create({
     data: {
       productId,
       url: stored.url,
       storageKey: stored.storageKey,
-      isPrimary: existingCount === 0, // first uploaded image becomes primary by default
+      isPrimary: existingCount === 0,
       sortOrder: existingCount,
       sizeBytes: stored.sizeBytes,
     },
   });
 
   await markUnpublishedIfNeeded(productId);
+
   return image;
 }
 
-export async function deleteProductImage(productId: string, imageId: string) {
-  const image = await prisma.productImage.findFirst({ where: { id: imageId, productId } });
-  if (!image) throw new HttpError(404, "تصویر یافت نشد.");
+export async function deleteProductImage(
+  productId: string,
+  imageId: string
+) {
+  const image = await prisma.productImage.findFirst({
+    where: {
+      id: imageId,
+      productId,
+    },
+  });
 
-  await storage.delete(image.storageKey).catch(() => undefined);
-  await prisma.productImage.delete({ where: { id: imageId } });
+  if (!image) {
+    throw new HttpError(
+      404,
+      "تصویر یافت نشد."
+    );
+  }
 
-  // If the deleted image was primary, promote the next one.
+  await storage
+    .delete(image.storageKey)
+    .catch(() => undefined);
+
+  await prisma.productImage.delete({
+    where: {
+      id: imageId,
+    },
+  });
+
+  // اگر تصویر اصلی حذف شد، تصویر بعدی اصلی شود.
   if (image.isPrimary) {
     const next = await prisma.productImage.findFirst({
-      where: { productId },
-      orderBy: { sortOrder: "asc" },
+      where: {
+        productId,
+      },
+      orderBy: {
+        sortOrder: "asc",
+      },
     });
+
     if (next) {
-      await prisma.productImage.update({ where: { id: next.id }, data: { isPrimary: true } });
+      await prisma.productImage.update({
+        where: {
+          id: next.id,
+        },
+        data: {
+          isPrimary: true,
+        },
+      });
     }
   }
 
   await markUnpublishedIfNeeded(productId);
 }
 
-export async function setPrimaryImage(productId: string, imageId: string) {
-  const image = await prisma.productImage.findFirst({ where: { id: imageId, productId } });
-  if (!image) throw new HttpError(404, "تصویر یافت نشد.");
+export async function setPrimaryImage(
+  productId: string,
+  imageId: string
+) {
+  const image = await prisma.productImage.findFirst({
+    where: {
+      id: imageId,
+      productId,
+    },
+  });
+
+  if (!image) {
+    throw new HttpError(
+      404,
+      "تصویر یافت نشد."
+    );
+  }
 
   await prisma.$transaction([
-    prisma.productImage.updateMany({ where: { productId }, data: { isPrimary: false } }),
-    prisma.productImage.update({ where: { id: imageId }, data: { isPrimary: true } }),
+    prisma.productImage.updateMany({
+      where: {
+        productId,
+      },
+      data: {
+        isPrimary: false,
+      },
+    }),
+
+    prisma.productImage.update({
+      where: {
+        id: imageId,
+      },
+      data: {
+        isPrimary: true,
+      },
+    }),
   ]);
 
   await markUnpublishedIfNeeded(productId);
 }
 
-export async function reorderImages(productId: string, imageIds: string[]) {
-  const images = await prisma.productImage.findMany({ where: { productId } });
-  const ownedIds = new Set(images.map((i) => i.id));
+export async function reorderImages(
+  productId: string,
+  imageIds: string[]
+) {
+  const images = await prisma.productImage.findMany({
+    where: {
+      productId,
+    },
+  });
+
+  const ownedIds = new Set(
+    images.map((image) => image.id)
+  );
 
   for (const id of imageIds) {
     if (!ownedIds.has(id)) {
-      throw new HttpError(400, "شناسه تصویر نامعتبر است.");
+      throw new HttpError(
+        400,
+        "شناسه تصویر نامعتبر است."
+      );
     }
   }
 
   await prisma.$transaction(
     imageIds.map((id, index) =>
-      prisma.productImage.update({ where: { id }, data: { sortOrder: index } })
+      prisma.productImage.update({
+        where: {
+          id,
+        },
+        data: {
+          sortOrder: index,
+        },
+      })
     )
   );
 
   await markUnpublishedIfNeeded(productId);
 }
 
-export async function addProductModel(productId: string, file: Express.Multer.File) {
-  const kind = await assertValidModel(file.buffer, file.originalname);
+export async function addProductModel(
+  productId: string,
+  file: Express.Multer.File
+) {
+  await assertUploadAllowed(
+    productId,
+    file.buffer.length
+  );
+
+  const kind = await assertValidModel(
+    file.buffer,
+    file.originalname
+  );
 
   const stored = await storage.save({
     folder: `products/${productId}/models`,
     filename: file.originalname,
     buffer: file.buffer,
-    contentType: file.mimetype || "application/octet-stream",
+    contentType:
+      file.mimetype ||
+      "application/octet-stream",
   });
 
   const model = await prisma.productModel.create({
     data: {
       productId,
-      kind, // "GLB" | "GLTF" | "USDZ"
+      kind,
       url: stored.url,
       storageKey: stored.storageKey,
       sizeBytes: stored.sizeBytes,
@@ -103,24 +298,58 @@ export async function addProductModel(productId: string, file: Express.Multer.Fi
   });
 
   await markUnpublishedIfNeeded(productId);
+
   return model;
 }
 
-export async function deleteProductModel(productId: string, modelId: string) {
-  const model = await prisma.productModel.findFirst({ where: { id: modelId, productId } });
-  if (!model) throw new HttpError(404, "فایل سه‌بعدی یافت نشد.");
+export async function deleteProductModel(
+  productId: string,
+  modelId: string
+) {
+  const model = await prisma.productModel.findFirst({
+    where: {
+      id: modelId,
+      productId,
+    },
+  });
 
-  await storage.delete(model.storageKey).catch(() => undefined);
-  await prisma.productModel.delete({ where: { id: modelId } });
+  if (!model) {
+    throw new HttpError(
+      404,
+      "فایل سه‌بعدی یافت نشد."
+    );
+  }
+
+  await storage
+    .delete(model.storageKey)
+    .catch(() => undefined);
+
+  await prisma.productModel.delete({
+    where: {
+      id: modelId,
+    },
+  });
+
   await markUnpublishedIfNeeded(productId);
 }
 
-async function markUnpublishedIfNeeded(productId: string) {
-  const product = await prisma.product.findUnique({ where: { id: productId } });
+async function markUnpublishedIfNeeded(
+  productId: string
+) {
+  const product = await prisma.product.findUnique({
+    where: {
+      id: productId,
+    },
+  });
+
   if (product?.visibility === "PUBLISHED") {
     await prisma.product.update({
-      where: { id: productId },
-      data: { hasUnpublishedChanges: true },
+      where: {
+        id: productId,
+      },
+      data: {
+        hasUnpublishedChanges: true,
+      },
     });
   }
 }
