@@ -1,3 +1,4 @@
+import sharp from "sharp";
 import { prisma } from "../config/prisma";
 import { storage } from "../storage";
 import { assertValidImage, assertValidModel } from "../middleware/upload";
@@ -41,7 +42,6 @@ async function assertUploadAllowed(
 
   const storageLimitMb = activeSub.plan.storageLimitMb;
 
-  // اگر پلن محدودیت فضا نداشته باشد، آپلود آزاد است.
   if (!storageLimitMb) {
     return;
   }
@@ -92,6 +92,43 @@ async function assertUploadAllowed(
   }
 }
 
+/**
+ * Converts supported raster images to WebP before storage.
+ *
+ * This gives the public site smaller and faster-loading images while
+ * keeping the original upload completely outside persistent storage.
+ */
+async function convertImageToWebP(
+  buffer: Buffer
+): Promise<{
+  buffer: Buffer;
+  width?: number;
+  height?: number;
+}> {
+  try {
+    const result = await sharp(buffer)
+      .rotate()
+      .webp({
+        quality: 88,
+        effort: 4,
+      })
+      .toBuffer({
+        resolveWithObject: true,
+      });
+
+    return {
+      buffer: result.data,
+      width: result.info.width,
+      height: result.info.height,
+    };
+  } catch {
+    throw new HttpError(
+      400,
+      "پردازش تصویر ناموفق بود. لطفاً یک تصویر معتبر JPG، PNG یا WEBP انتخاب کنید."
+    );
+  }
+}
+
 export async function addProductImage(
   productId: string,
   file: Express.Multer.File
@@ -103,15 +140,31 @@ export async function addProductImage(
 
   await assertValidImage(file.buffer);
 
+  const converted = await convertImageToWebP(
+    file.buffer
+  );
+
+  /*
+   * Storage accounting is based on the actual stored file size,
+   * not the temporary uploaded file size.
+   */
+  if (converted.buffer.length > file.buffer.length) {
+    // The original upload has already passed the upload-size limit.
+    // We intentionally do not reject a valid image just because WebP
+    // happens to be slightly larger than the original.
+  }
+
   const stored = await storage.save({
     folder: `products/${productId}/images`,
-    filename: file.originalname,
-    buffer: file.buffer,
-    contentType: file.mimetype,
+    filename: `${stripExtension(file.originalname)}.webp`,
+    buffer: converted.buffer,
+    contentType: "image/webp",
   });
 
   const existingCount = await prisma.productImage.count({
-    where: { productId },
+    where: {
+      productId,
+    },
   });
 
   const image = await prisma.productImage.create({
@@ -121,6 +174,8 @@ export async function addProductImage(
       storageKey: stored.storageKey,
       isPrimary: existingCount === 0,
       sortOrder: existingCount,
+      width: converted.width ?? null,
+      height: converted.height ?? null,
       sizeBytes: stored.sizeBytes,
     },
   });
@@ -158,7 +213,6 @@ export async function deleteProductImage(
     },
   });
 
-  // اگر تصویر اصلی حذف شد، تصویر بعدی اصلی شود.
   if (image.isPrimary) {
     const next = await prisma.productImage.findFirst({
       where: {
@@ -246,6 +300,13 @@ export async function reorderImages(
         "شناسه تصویر نامعتبر است."
       );
     }
+  }
+
+  if (new Set(imageIds).size !== imageIds.length) {
+    throw new HttpError(
+      400,
+      "شناسه‌های تصویر تکراری هستند."
+    );
   }
 
   await prisma.$transaction(
@@ -352,4 +413,21 @@ async function markUnpublishedIfNeeded(
       },
     });
   }
+}
+
+function stripExtension(filename: string): string {
+  const lastDot = filename.lastIndexOf(".");
+
+  if (lastDot <= 0) {
+    return "image";
+  }
+
+  const name = filename.slice(0, lastDot);
+
+  return (
+    name
+      .replace(/[^a-zA-Z0-9\u0600-\u06FF_-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 100) || "image"
+  );
 }
