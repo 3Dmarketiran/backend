@@ -513,6 +513,9 @@ async function getPublicSellers() {
  * Generates the public category catalog.
  *
  * Only active categories are exposed publicly.
+ *
+ * The explicit isActive:true value is included in the public
+ * contract so the frontend can safely validate stale/cached data.
  */
 async function getPublicCategories() {
   return prisma.category.findMany({
@@ -524,6 +527,7 @@ async function getPublicCategories() {
       id: true,
       slug: true,
       name: true,
+      isActive: true,
       parentId: true,
     },
 
