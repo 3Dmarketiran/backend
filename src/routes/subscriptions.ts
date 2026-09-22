@@ -2,64 +2,84 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../config/prisma";
 import { requireAuth } from "../middleware/auth";
-import { requireAdmin, requireOwnSeller } from "../middleware/rbac";
+import {
+  requireAdmin,
+  requireOwnSeller,
+} from "../middleware/rbac";
 import { HttpError } from "../middleware/errorHandler";
-import { parseJson, serializeJson } from "../utils/json";
+import {
+  parseJson,
+  serializeJson,
+} from "../utils/json";
 
 export const subscriptionsRouter = Router();
+
+// ---------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------
+
+function isValidDate(value: Date) {
+  return !Number.isNaN(value.getTime());
+}
+
+function isSubscriptionCurrentlyActive(
+  status: string,
+  endDate: Date | null
+) {
+  if (status !== "ACTIVE") {
+    return false;
+  }
+
+  if (!endDate) {
+    return false;
+  }
+
+  return endDate.getTime() >= Date.now();
+}
+
+function serializePlan(plan: any) {
+  return {
+    ...plan,
+    features: parseJson(
+      plan.features,
+      {}
+    ),
+  };
+}
+
+function serializeSubscription(
+  subscription: any
+) {
+  return {
+    ...subscription,
+    plan: subscription.plan
+      ? serializePlan(subscription.plan)
+      : undefined,
+  };
+}
 
 // ---------------------------------------------------------------------
 // Plans
 // ---------------------------------------------------------------------
 
-subscriptionsRouter.get("/plans", async (_req, res, next) => {
-  try {
-    const plans = await prisma.subscriptionPlan.findMany({
-      where: { isActive: true },
-      orderBy: { durationDays: "asc" },
-    });
-
-    res.json({
-      plans: plans.map((p) => ({
-        ...p,
-        features: parseJson(p.features, {}),
-      })),
-    });
-  } catch (err) {
-    next(err);
-  }
-});
-
-const planSchema = z.object({
-  name: z.string().min(2).max(120),
-  durationDays: z.number().int().positive(),
-  price: z.number().nonnegative(),
-  discountPct: z.number().min(0).max(100).optional(),
-  features: z.record(z.unknown()).optional(),
-  productLimit: z.number().int().positive().optional(),
-  storageLimitMb: z.number().int().positive().optional(),
-});
-
-subscriptionsRouter.post(
+subscriptionsRouter.get(
   "/plans",
-  requireAuth,
-  requireAdmin,
-  async (req, res, next) => {
+  async (_req, res, next) => {
     try {
-      const input = planSchema.parse(req.body);
+      const plans =
+        await prisma.subscriptionPlan.findMany({
+          where: {
+            isActive: true,
+          },
+          orderBy: {
+            durationDays: "asc",
+          },
+        });
 
-      const plan = await prisma.subscriptionPlan.create({
-        data: {
-          ...input,
-          features: serializeJson(input.features),
-        },
-      });
-
-      res.status(201).json({
-        plan: {
-          ...plan,
-          features: parseJson(plan.features, {}),
-        },
+      res.json({
+        plans: plans.map(
+          serializePlan
+        ),
       });
     } catch (err) {
       next(err);
@@ -67,33 +87,159 @@ subscriptionsRouter.post(
   }
 );
 
+const planSchema = z.object({
+  name: z.string().min(2).max(120),
+
+  durationDays:
+    z.number().int().positive(),
+
+  price:
+    z.number().nonnegative(),
+
+  discountPct:
+    z.number().min(0).max(100).optional(),
+
+  features:
+    z.record(z.unknown()).optional(),
+
+  productLimit:
+    z.number().int().positive().nullable().optional(),
+
+  storageLimitMb:
+    z.number().int().positive().nullable().optional(),
+});
+
+// ---------------------------------------------------------------------
+// Admin plan creation
+// ---------------------------------------------------------------------
+
+subscriptionsRouter.post(
+  "/plans",
+  requireAuth,
+  requireAdmin,
+  async (req, res, next) => {
+    try {
+      const input =
+        planSchema.parse(
+          req.body
+        );
+
+      const plan =
+        await prisma.subscriptionPlan.create({
+          data: {
+            name: input.name,
+            durationDays:
+              input.durationDays,
+            price: input.price,
+            discountPct:
+              input.discountPct,
+            features:
+              serializeJson(
+                input.features
+              ),
+            productLimit:
+              input.productLimit ??
+              null,
+            storageLimitMb:
+              input.storageLimitMb ??
+              null,
+          },
+        });
+
+      res.status(201).json({
+        plan:
+          serializePlan(plan),
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------
+// Admin plan update
+// ---------------------------------------------------------------------
+
 subscriptionsRouter.put(
   "/plans/:id",
   requireAuth,
   requireAdmin,
   async (req, res, next) => {
     try {
-      const input = planSchema.partial().parse(req.body);
+      const input =
+        planSchema
+          .partial()
+          .parse(req.body);
 
-      const plan = await prisma.subscriptionPlan.update({
-        where: {
-          id: req.params.id,
-        },
-        data: {
-          ...input,
-          ...(input.features !== undefined
-            ? {
-                features: serializeJson(input.features),
-              }
-            : {}),
-        },
-      });
+      const plan =
+        await prisma.subscriptionPlan.update({
+          where: {
+            id: req.params.id,
+          },
+
+          data: {
+            ...(input.name !==
+            undefined
+              ? {
+                  name: input.name,
+                }
+              : {}),
+
+            ...(input.durationDays !==
+            undefined
+              ? {
+                  durationDays:
+                    input.durationDays,
+                }
+              : {}),
+
+            ...(input.price !==
+            undefined
+              ? {
+                  price:
+                    input.price,
+                }
+              : {}),
+
+            ...(input.discountPct !==
+            undefined
+              ? {
+                  discountPct:
+                    input.discountPct,
+                }
+              : {}),
+
+            ...(input.productLimit !==
+            undefined
+              ? {
+                  productLimit:
+                    input.productLimit,
+                }
+              : {}),
+
+            ...(input.storageLimitMb !==
+            undefined
+              ? {
+                  storageLimitMb:
+                    input.storageLimitMb,
+                }
+              : {}),
+
+            ...(input.features !==
+            undefined
+              ? {
+                  features:
+                    serializeJson(
+                      input.features
+                    ),
+                }
+              : {}),
+          },
+        });
 
       res.json({
-        plan: {
-          ...plan,
-          features: parseJson(plan.features, {}),
-        },
+        plan:
+          serializePlan(plan),
       });
     } catch (err) {
       next(err);
@@ -111,88 +257,148 @@ subscriptionsRouter.get(
   requireOwnSeller(),
   async (req, res, next) => {
     try {
-      const sellerId = req.params.sellerId;
+      const sellerId =
+        req.params.sellerId;
 
-      const [productCount, imageUsage, modelUsage, activeSubscription] =
-        await Promise.all([
-          prisma.product.count({
-            where: {
+      const now = new Date();
+
+      const [
+        productCount,
+        imageUsage,
+        modelUsage,
+        activeSubscription,
+      ] = await Promise.all([
+        prisma.product.count({
+          where: {
+            sellerId,
+          },
+        }),
+
+        prisma.productImage.aggregate({
+          where: {
+            product: {
               sellerId,
             },
-          }),
+          },
 
-          prisma.productImage.aggregate({
-            where: {
-              product: {
-                sellerId,
-              },
-            },
-            _sum: {
-              sizeBytes: true,
-            },
-          }),
+          _sum: {
+            sizeBytes: true,
+          },
+        }),
 
-          prisma.productModel.aggregate({
-            where: {
-              product: {
-                sellerId,
-              },
-            },
-            _sum: {
-              sizeBytes: true,
-            },
-          }),
-
-          prisma.subscription.findFirst({
-            where: {
+        prisma.productModel.aggregate({
+          where: {
+            product: {
               sellerId,
-              status: "ACTIVE",
-              endDate: {
-                gte: new Date(),
-              },
             },
-            include: {
-              plan: true,
+          },
+
+          _sum: {
+            sizeBytes: true,
+          },
+        }),
+
+        prisma.subscription.findFirst({
+          where: {
+            sellerId,
+
+            status: "ACTIVE",
+
+            startDate: {
+              lte: now,
             },
-            orderBy: {
-              endDate: "desc",
+
+            endDate: {
+              gte: now,
             },
-          }),
-        ]);
+          },
+
+          include: {
+            plan: true,
+          },
+
+          orderBy: {
+            endDate: "desc",
+          },
+        }),
+      ]);
 
       const usedBytes =
-        (imageUsage._sum.sizeBytes ?? 0) +
-        (modelUsage._sum.sizeBytes ?? 0);
+        (imageUsage._sum
+          .sizeBytes ?? 0) +
+        (modelUsage._sum
+          .sizeBytes ?? 0);
 
-      const usedMb = usedBytes / (1024 * 1024);
+      const usedMb =
+        usedBytes /
+        (1024 * 1024);
+
+      const subscription =
+        activeSubscription &&
+        isSubscriptionCurrentlyActive(
+          activeSubscription.status,
+          activeSubscription.endDate
+        )
+          ? activeSubscription
+          : null;
 
       res.json({
         productCount,
-        productLimit: activeSubscription?.plan.productLimit ?? null,
 
-        storageUsedBytes: usedBytes,
-        storageUsedMb: Number(usedMb.toFixed(2)),
+        productLimit:
+          subscription
+            ?.plan.productLimit ??
+          null,
+
+        storageUsedBytes:
+          usedBytes,
+
+        storageUsedMb:
+          Number(
+            usedMb.toFixed(2)
+          ),
+
         storageLimitMb:
-          activeSubscription?.plan.storageLimitMb ?? null,
+          subscription
+            ?.plan.storageLimitMb ??
+          null,
 
-        subscription: activeSubscription
-          ? {
-              id: activeSubscription.id,
-              status: activeSubscription.status,
-              startDate: activeSubscription.startDate,
-              endDate: activeSubscription.endDate,
-              plan: {
-                id: activeSubscription.plan.id,
-                name: activeSubscription.plan.name,
-                durationDays:
-                  activeSubscription.plan.durationDays,
-                productLimit:
-                  activeSubscription.plan.productLimit,
-                storageLimitMb:
-                  activeSubscription.plan.storageLimitMb,
-              },
-            }
-          : null,
+        subscription:
+          subscription
+            ? {
+                id: subscription.id,
+
+                status:
+                  subscription.status,
+
+                startDate:
+                  subscription.startDate,
+
+                endDate:
+                  subscription.endDate,
+
+                plan: {
+                  id:
+                    subscription.plan.id,
+
+                  name:
+                    subscription.plan
+                      .name,
+
+                  durationDays:
+                    subscription.plan
+                      .durationDays,
+
+                  productLimit:
+                    subscription.plan
+                      .productLimit,
+
+                  storageLimitMb:
+                    subscription.plan
+                      .storageLimitMb,
+                },
+              }
+            : null,
       });
     } catch (err) {
       next(err);
@@ -201,15 +407,23 @@ subscriptionsRouter.get(
 );
 
 // ---------------------------------------------------------------------
-// Subscriptions
+// Activate subscription
 // ---------------------------------------------------------------------
 
-const activateSchema = z.object({
-  sellerId: z.string().cuid(),
-  planId: z.string().cuid(),
-  startDate: z.string().datetime().optional(),
-  notes: z.string().max(1000).optional(),
-});
+const activateSchema =
+  z.object({
+    sellerId:
+      z.string().cuid(),
+
+    planId:
+      z.string().cuid(),
+
+    startDate:
+      z.string().datetime().optional(),
+
+    notes:
+      z.string().max(1000).optional(),
+  });
 
 subscriptionsRouter.post(
   "/activate",
@@ -217,62 +431,159 @@ subscriptionsRouter.post(
   requireAdmin,
   async (req, res, next) => {
     try {
-      const input = activateSchema.parse(req.body);
+      const input =
+        activateSchema.parse(
+          req.body
+        );
 
-      const plan = await prisma.subscriptionPlan.findUnique({
-        where: {
-          id: input.planId,
-        },
-      });
+      const [
+        plan,
+        existingActiveSubscription,
+      ] = await Promise.all([
+        prisma.subscriptionPlan.findUnique(
+          {
+            where: {
+              id: input.planId,
+            },
+          }
+        ),
+
+        prisma.subscription.findFirst({
+          where: {
+            sellerId:
+              input.sellerId,
+
+            status: "ACTIVE",
+
+            endDate: {
+              gte: new Date(),
+            },
+          },
+
+          orderBy: {
+            endDate: "desc",
+          },
+        }),
+      ]);
 
       if (!plan) {
-        throw new HttpError(404, "پلن یافت نشد.");
+        throw new HttpError(
+          404,
+          "پلن یافت نشد."
+        );
       }
 
-      const startDate = input.startDate
-        ? new Date(input.startDate)
-        : new Date();
+      if (!plan.isActive) {
+        throw new HttpError(
+          409,
+          "این پلن غیرفعال است و قابل فعال‌سازی نیست."
+        );
+      }
 
-      const endDate = new Date(
-        startDate.getTime() +
-          plan.durationDays * 24 * 60 * 60 * 1000
-      );
+      if (
+        existingActiveSubscription
+      ) {
+        throw new HttpError(
+          409,
+          "این فروشگاه در حال حاضر یک اشتراک فعال دارد. ابتدا اشتراک فعلی را لغو یا منقضی کنید."
+        );
+      }
 
-      const subscription = await prisma.subscription.create({
-        data: {
-          sellerId: input.sellerId,
-          planId: input.planId,
-          status: "ACTIVE",
-          startDate,
-          endDate,
-          activatedById: req.user!.id,
-          notes: input.notes,
-        },
-      });
+      const startDate =
+        input.startDate
+          ? new Date(
+              input.startDate
+            )
+          : new Date();
+
+      if (
+        !isValidDate(
+          startDate
+        )
+      ) {
+        throw new HttpError(
+          400,
+          "تاریخ شروع اشتراک نامعتبر است."
+        );
+      }
+
+      const endDate =
+        new Date(
+          startDate.getTime() +
+            plan.durationDays *
+              24 *
+              60 *
+              60 *
+              1000
+        );
+
+      const subscription =
+        await prisma.subscription.create(
+          {
+            data: {
+              sellerId:
+                input.sellerId,
+
+              planId:
+                input.planId,
+
+              status:
+                "ACTIVE",
+
+              startDate,
+
+              endDate,
+
+              activatedById:
+                req.user!.id,
+
+              notes:
+                input.notes,
+            },
+
+            include: {
+              plan: true,
+            },
+          }
+        );
 
       await prisma.auditLog.create({
         data: {
-          actorId: req.user!.id,
-          sellerId: input.sellerId,
-          action: "SUBSCRIPTION_ACTIVATED",
-          entity: "Subscription",
-          entityId: subscription.id,
-          metadata: serializeJson({
-            planId: input.planId,
-            endDate,
-          }),
-          ipAddress: req.ip,
+          actorId:
+            req.user!.id,
+
+          sellerId:
+            input.sellerId,
+
+          action:
+            "SUBSCRIPTION_ACTIVATED",
+
+          entity:
+            "Subscription",
+
+          entityId:
+            subscription.id,
+
+          metadata:
+            serializeJson({
+              planId:
+                input.planId,
+
+              startDate,
+
+              endDate,
+            }),
+
+          ipAddress:
+            req.ip,
         },
       });
 
       res.status(201).json({
-        subscription: {
-          ...subscription,
-          plan: {
-            ...plan,
-            features: parseJson(plan.features, {}),
-          },
-        },
+        subscription:
+          serializeSubscription(
+            subscription
+          ),
       });
     } catch (err) {
       next(err);
@@ -280,34 +591,88 @@ subscriptionsRouter.post(
   }
 );
 
+// ---------------------------------------------------------------------
+// Cancel subscription
+// ---------------------------------------------------------------------
+
 subscriptionsRouter.post(
   "/:id/cancel",
   requireAuth,
   requireAdmin,
   async (req, res, next) => {
     try {
-      const subscription = await prisma.subscription.update({
-        where: {
-          id: req.params.id,
-        },
-        data: {
-          status: "CANCELLED",
-        },
-      });
+      const subscription =
+        await prisma.subscription.findUnique(
+          {
+            where: {
+              id: req.params.id,
+            },
+          }
+        );
+
+      if (!subscription) {
+        throw new HttpError(
+          404,
+          "اشتراک یافت نشد."
+        );
+      }
+
+      if (
+        subscription.status ===
+        "CANCELLED"
+      ) {
+        throw new HttpError(
+          409,
+          "این اشتراک قبلاً لغو شده است."
+        );
+      }
+
+      const updated =
+        await prisma.subscription.update(
+          {
+            where: {
+              id:
+                req.params.id,
+            },
+
+            data: {
+              status:
+                "CANCELLED",
+            },
+
+            include: {
+              plan: true,
+            },
+          }
+        );
 
       await prisma.auditLog.create({
         data: {
-          actorId: req.user!.id,
-          sellerId: subscription.sellerId,
-          action: "SUBSCRIPTION_CANCELLED",
-          entity: "Subscription",
-          entityId: subscription.id,
-          ipAddress: req.ip,
+          actorId:
+            req.user!.id,
+
+          sellerId:
+            updated.sellerId,
+
+          action:
+            "SUBSCRIPTION_CANCELLED",
+
+          entity:
+            "Subscription",
+
+          entityId:
+            updated.id,
+
+          ipAddress:
+            req.ip,
         },
       });
 
       res.json({
-        subscription,
+        subscription:
+          serializeSubscription(
+            updated
+          ),
       });
     } catch (err) {
       next(err);
@@ -326,29 +691,29 @@ subscriptionsRouter.get(
   async (req, res, next) => {
     try {
       const subscriptions =
-        await prisma.subscription.findMany({
-          where: {
-            sellerId: req.params.sellerId,
-          },
-          include: {
-            plan: true,
-          },
-          orderBy: {
-            createdAt: "desc",
-          },
-        });
+        await prisma.subscription.findMany(
+          {
+            where: {
+              sellerId:
+                req.params.sellerId,
+            },
+
+            include: {
+              plan: true,
+            },
+
+            orderBy: {
+              createdAt:
+                "desc",
+            },
+          }
+        );
 
       res.json({
-        subscriptions: subscriptions.map((s) => ({
-          ...s,
-          plan: {
-            ...s.plan,
-            features: parseJson(
-              s.plan.features,
-              {}
-            ),
-          },
-        })),
+        subscriptions:
+          subscriptions.map(
+            serializeSubscription
+          ),
       });
     } catch (err) {
       next(err);
@@ -362,17 +727,22 @@ subscriptionsRouter.get(
 
 export async function expireOverdueSubscriptions() {
   const result =
-    await prisma.subscription.updateMany({
-      where: {
-        status: "ACTIVE",
-        endDate: {
-          lt: new Date(),
+    await prisma.subscription.updateMany(
+      {
+        where: {
+          status: "ACTIVE",
+
+          endDate: {
+            lt: new Date(),
+          },
         },
-      },
-      data: {
-        status: "EXPIRED",
-      },
-    });
+
+        data: {
+          status:
+            "EXPIRED",
+        },
+      }
+    );
 
   return result.count;
 }
