@@ -17,7 +17,10 @@ export async function hashPassword(plain: string): Promise<string> {
   return bcrypt.hash(plain, SALT_ROUNDS);
 }
 
-export async function verifyPassword(plain: string, hash: string): Promise<boolean> {
+export async function verifyPassword(
+  plain: string,
+  hash: string
+): Promise<boolean> {
   return bcrypt.compare(plain, hash);
 }
 
@@ -25,6 +28,9 @@ export async function verifyPassword(plain: string, hash: string): Promise<boole
  * Attempts a login. Records every attempt (success or failure) for rate
  * limiting / brute-force detection, and never reveals whether the email
  * or the password was the wrong part (prevents user enumeration).
+ *
+ * The seller relation is loaded during login so seller accounts have
+ * everything required by the frontend immediately after authentication.
  */
 export async function login(
   email: string,
@@ -32,25 +38,44 @@ export async function login(
   ipAddress: string | undefined,
   userAgent: string | undefined
 ) {
-  const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
+  const user = await prisma.user.findUnique({
+    where: {
+      email: email.toLowerCase(),
+    },
+    include: {
+      seller: true,
+    },
+  });
 
   const genericError = () =>
     new AuthError("ایمیل یا رمز عبور نادرست است.", 401);
 
   if (!user || !user.isActive) {
     await prisma.loginAttempt.create({
-      data: { email: email.toLowerCase(), success: false, ipAddress },
+      data: {
+        email: email.toLowerCase(),
+        success: false,
+        ipAddress,
+      },
     });
+
     throw genericError();
   }
 
   const valid = await verifyPassword(password, user.passwordHash);
 
   await prisma.loginAttempt.create({
-    data: { email: email.toLowerCase(), userId: user.id, success: valid, ipAddress },
+    data: {
+      email: email.toLowerCase(),
+      userId: user.id,
+      success: valid,
+      ipAddress,
+    },
   });
 
-  if (!valid) throw genericError();
+  if (!valid) {
+    throw genericError();
+  }
 
   const session = await prisma.session.create({
     data: {
@@ -71,36 +96,76 @@ export async function login(
     },
   });
 
-  return { user, sessionId: session.id, expiresAt: session.expiresAt };
+  return {
+    user,
+    sessionId: session.id,
+    expiresAt: session.expiresAt,
+  };
 }
 
-export async function logout(sessionId: string, actorId?: string) {
-  await prisma.session.deleteMany({ where: { id: sessionId } });
+export async function logout(
+  sessionId: string,
+  actorId?: string
+) {
+  await prisma.session.deleteMany({
+    where: {
+      id: sessionId,
+    },
+  });
+
   if (actorId) {
     await prisma.auditLog.create({
-      data: { actorId, action: "LOGOUT", entity: "User", entityId: actorId },
+      data: {
+        actorId,
+        action: "LOGOUT",
+        entity: "User",
+        entityId: actorId,
+      },
     });
   }
 }
 
-/** Resolves a session cookie value to its user, or null if invalid/expired. */
+/**
+ * Resolves a session cookie value to its user, or null if invalid/expired.
+ */
 export async function getUserBySession(sessionId: string) {
-  if (!sessionId) return null;
-
-  const session = await prisma.session.findUnique({
-    where: { id: sessionId },
-    include: { user: { include: { seller: true } } },
-  });
-
-  if (!session) return null;
-
-  if (session.expiresAt < new Date()) {
-    // Expired — clean up lazily and treat as unauthenticated.
-    await prisma.session.delete({ where: { id: session.id } }).catch(() => undefined);
+  if (!sessionId) {
     return null;
   }
 
-  if (!session.user.isActive) return null;
+  const session = await prisma.session.findUnique({
+    where: {
+      id: sessionId,
+    },
+    include: {
+      user: {
+        include: {
+          seller: true,
+        },
+      },
+    },
+  });
+
+  if (!session) {
+    return null;
+  }
+
+  if (session.expiresAt < new Date()) {
+    // Expired — clean up lazily and treat as unauthenticated.
+    await prisma.session
+      .delete({
+        where: {
+          id: session.id,
+        },
+      })
+      .catch(() => undefined);
+
+    return null;
+  }
+
+  if (!session.user.isActive) {
+    return null;
+  }
 
   return session.user;
 }
@@ -114,7 +179,10 @@ export async function createUserWithRole(params: {
   email: string;
   password: string;
   role: Role;
-  seller?: { storeName: string; slug: string };
+  seller?: {
+    storeName: string;
+    slug: string;
+  };
 }) {
   const passwordHash = await hashPassword(params.password);
 
@@ -132,7 +200,9 @@ export async function createUserWithRole(params: {
           }
         : undefined,
     },
-    include: { seller: true },
+    include: {
+      seller: true,
+    },
   });
 }
 
