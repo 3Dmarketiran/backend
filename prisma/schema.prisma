@@ -10,7 +10,7 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql" // change to "postgresql" for production
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -74,28 +74,28 @@ model LoginAttempt {
 // ----------------------------------------------------------------
 
 model Seller {
-  id          String   @id @default(cuid())
-  userId      String   @unique
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id           String   @id @default(cuid())
+  userId       String   @unique
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  slug        String   @unique
-  storeName   String
-  description String?
-  logoUrl     String?
+  slug         String   @unique
+  storeName    String
+  description  String?
+  logoUrl      String?
   contactEmail String?
   contactPhone String?
-  socialLinks String?   // JSON-serialized object
+  socialLinks  String?   // JSON-serialized object
 
-  isActive    Boolean  @default(true) // admin can hard-disable regardless of subscription
+  isActive     Boolean  @default(true) // admin can hard-disable regardless of subscription
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
-  products      Product[]
-  subscriptions Subscription[]
-  publishJobs   PublishJob[]
+  products        Product[]
+  subscriptions   Subscription[]
+  publishJobs     PublishJob[]
   analyticsEvents AnalyticsEvent[]
-  auditLogs     AuditLog[]       @relation("AuditSeller")
+  auditLogs       AuditLog[]       @relation("AuditSeller")
 
   @@index([slug])
 }
@@ -108,6 +108,11 @@ model Category {
   id        String   @id @default(cuid())
   slug      String   @unique
   name      String
+
+  // Super Admin can temporarily disable a category
+  // without deleting products assigned to it.
+  isActive  Boolean  @default(true)
+
   parentId  String?
   parent    Category?  @relation("CategoryTree", fields: [parentId], references: [id])
   children  Category[] @relation("CategoryTree")
@@ -116,6 +121,9 @@ model Category {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([parentId])
+  @@index([isActive])
 }
 
 model Product {
@@ -132,11 +140,12 @@ model Product {
   category    Category?         @relation(fields: [categoryId], references: [id])
   tags        String?           // comma-separated; normalized in service layer
 
-  // Real-world dimensions, normalized internally to millimeters (see utils/dimensions.ts)
+  // Real-world dimensions, normalized internally to millimeters
+  // (see utils/dimensions.ts)
   widthMm     Float?
   heightMm    Float?
   depthMm     Float?
-  inputUnit   String?       // MM | CM | M    // unit the seller originally entered, kept for display
+  inputUnit   String?           // MM | CM | M
 
   visibility  String            @default("DRAFT")
 
@@ -147,11 +156,11 @@ model Product {
   updatedAt   DateTime          @updatedAt
   publishedAt DateTime?
 
-  images      ProductImage[]
-  models      ProductModel[]
-  publishJobs PublishJob[]
+  images          ProductImage[]
+  models          ProductModel[]
+  publishJobs     PublishJob[]
   analyticsEvents AnalyticsEvent[]
-  auditLogs   AuditLog[]        @relation("AuditProduct")
+  auditLogs       AuditLog[]        @relation("AuditProduct")
 
   @@index([sellerId])
   @@index([visibility])
@@ -163,13 +172,13 @@ model ProductImage {
   productId String
   product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
 
-  url       String   // storage-provider URL (see StorageProvider abstraction, Phase 2)
-  storageKey String  // internal key/path used by the storage provider
-  isPrimary Boolean  @default(false)
-  sortOrder Int      @default(0)
-  width     Int?
-  height    Int?
-  sizeBytes Int?
+  url        String
+  storageKey String
+  isPrimary  Boolean  @default(false)
+  sortOrder  Int      @default(0)
+  width      Int?
+  height     Int?
+  sizeBytes  Int?
 
   createdAt DateTime @default(now())
 
@@ -177,14 +186,14 @@ model ProductImage {
 }
 
 model ProductModel {
-  id        String   @id @default(cuid())
-  productId String
-  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  id             String   @id @default(cuid())
+  productId      String
+  product        Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
 
-  kind      String   // "GLB" | "GLTF" | "USDZ"
-  url       String
-  storageKey String
-  sizeBytes Int?
+  kind           String   // "GLB" | "GLTF" | "USDZ"
+  url            String
+  storageKey     String
+  sizeBytes      Int?
   posterImageUrl String?
 
   createdAt DateTime @default(now())
@@ -197,36 +206,36 @@ model ProductModel {
 // ----------------------------------------------------------------
 
 model SubscriptionPlan {
-  id           String   @id @default(cuid())
-  name         String
-  durationDays Int
-  price        Float
-  discountPct  Float?
-  features     String?          // JSON-serialized object
-  productLimit Int?
+  id            String   @id @default(cuid())
+  name          String
+  durationDays  Int
+  price         Float
+  discountPct   Float?
+  features      String?
+  productLimit  Int?
   storageLimitMb Int?
-  isActive     Boolean  @default(true)
+  isActive      Boolean  @default(true)
 
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   subscriptions Subscription[]
 }
 
 model Subscription {
-  id        String              @id @default(cuid())
+  id        String           @id @default(cuid())
   sellerId  String
-  seller    Seller              @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  seller    Seller           @relation(fields: [sellerId], references: [id], onDelete: Cascade)
 
   planId    String
-  plan      SubscriptionPlan    @relation(fields: [planId], references: [id])
+  plan      SubscriptionPlan @relation(fields: [planId], references: [id])
 
-  status    String              @default("PENDING")
+  status    String   @default("PENDING")
   startDate DateTime?
   endDate   DateTime?
 
   activatedById String?
-  activatedBy   User?           @relation("ActivatedByAdmin", fields: [activatedById], references: [id])
+  activatedBy   User? @relation("ActivatedByAdmin", fields: [activatedById], references: [id])
 
   notes     String?
 
@@ -241,25 +250,25 @@ model Subscription {
 // ----------------------------------------------------------------
 
 model PublishJob {
-  id          String            @id @default(cuid())
+  id          String   @id @default(cuid())
   sellerId    String
-  seller      Seller            @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  seller      Seller   @relation(fields: [sellerId], references: [id], onDelete: Cascade)
 
   productId   String?
-  product     Product?          @relation(fields: [productId], references: [id])
+  product     Product? @relation(fields: [productId], references: [id])
 
   triggeredById String
-  triggeredBy   User            @relation("TriggeredByUser", fields: [triggeredById], references: [id])
+  triggeredBy   User @relation("TriggeredByUser", fields: [triggeredById], references: [id])
 
-  status      String            @default("QUEUED")
-  commitSha   String?
+  status       String  @default("QUEUED")
+  commitSha    String?
   errorMessage String?
 
-  requestedAt DateTime          @default(now())
+  requestedAt DateTime @default(now())
   startedAt   DateTime?
   finishedAt  DateTime?
 
-  logs        PublishLog[]
+  logs PublishLog[]
 
   @@index([sellerId])
   @@index([status])
@@ -270,9 +279,9 @@ model PublishLog {
   publishJobId String
   publishJob   PublishJob @relation(fields: [publishJobId], references: [id], onDelete: Cascade)
 
-  message      String
-  level        String     @default("info") // info | warn | error
-  createdAt    DateTime   @default(now())
+  message   String
+  level     String   @default("info")
+  createdAt DateTime @default(now())
 
   @@index([publishJobId])
 }
@@ -282,15 +291,15 @@ model PublishLog {
 // ----------------------------------------------------------------
 
 model AnalyticsEvent {
-  id        String             @id @default(cuid())
+  id        String   @id @default(cuid())
   type      String
   sellerId  String?
-  seller    Seller?            @relation(fields: [sellerId], references: [id])
+  seller    Seller?  @relation(fields: [sellerId], references: [id])
   productId String?
-  product   Product?           @relation(fields: [productId], references: [id])
+  product   Product? @relation(fields: [productId], references: [id])
 
-  metadata  String?             // JSON-serialized object
-  createdAt DateTime           @default(now())
+  metadata  String?
+  createdAt DateTime @default(now())
 
   @@index([type, createdAt])
   @@index([sellerId])
@@ -308,11 +317,11 @@ model AuditLog {
   productId String?
   product   Product? @relation("AuditProduct", fields: [productId], references: [id])
 
-  action    String   // e.g. "PRODUCT_PUBLISHED", "LOGIN", "SUBSCRIPTION_ACTIVATED"
-  entity    String   // e.g. "Product", "Seller", "Subscription"
+  action    String
+  entity    String
   entityId  String?
   ipAddress String?
-  metadata  String?             // JSON-serialized object
+  metadata  String?
 
   createdAt DateTime @default(now())
 
@@ -338,14 +347,16 @@ model PlatformSetting {
   colorText       String @default("#1E293B")
   fontFamily      String @default("Vazirmatn")
 
-  socialLinks   String?           // JSON-serialized object
+  socialLinks   String?
   contactEmail  String?
   contactPhone  String?
 
   githubOwner      String?
   githubRepository String?
   githubBranch     String   @default("main")
-  // NOTE: GitHub token is NEVER stored here — it lives only in server env vars (GITHUB_TOKEN).
 
-  updatedAt     DateTime @updatedAt
+  // NOTE: GitHub token is NEVER stored here.
+  // It lives only in server environment variables (GITHUB_TOKEN).
+
+  updatedAt DateTime @updatedAt
 }
