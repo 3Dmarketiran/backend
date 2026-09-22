@@ -8,6 +8,7 @@ import {
 import {
   uploadImage,
   uploadModel,
+  uploadModelZip,
 } from "../middleware/upload";
 import { HttpError } from "../middleware/errorHandler";
 import {
@@ -35,17 +36,20 @@ productsRouter.get("/", async (req, res, next) => {
       req.user?.role === "SUPER_ADMIN" ||
       req.user?.role === "SELLER";
 
-    // Sellers can only see their own products.
-    if (req.user?.role === "SELLER" && req.user.seller) {
+    if (
+      req.user?.role === "SELLER" &&
+      req.user.seller
+    ) {
       query.sellerId = req.user.seller.id;
     }
 
-    const result = await productService.listProducts(
-      query,
-      {
-        publicOnly: !isStaffOrSeller,
-      }
-    );
+    const result =
+      await productService.listProducts(
+        query,
+        {
+          publicOnly: !isStaffOrSeller,
+        }
+      );
 
     res.json(result);
   } catch (err) {
@@ -57,35 +61,40 @@ productsRouter.get("/", async (req, res, next) => {
 // Single product
 // ---------------------------------------------------------------------
 
-productsRouter.get("/:id", async (req, res, next) => {
-  try {
-    const product =
-      await productService.getProductById(req.params.id);
+productsRouter.get(
+  "/:id",
+  async (req, res, next) => {
+    try {
+      const product =
+        await productService.getProductById(
+          req.params.id
+        );
 
-    const isOwner =
-      req.user?.seller?.id === product.sellerId;
+      const isOwner =
+        req.user?.seller?.id ===
+        product.sellerId;
 
-    const isStaff =
-      req.user?.role === "ADMIN" ||
-      req.user?.role === "SUPER_ADMIN";
+      const isStaff =
+        req.user?.role === "ADMIN" ||
+        req.user?.role === "SUPER_ADMIN";
 
-    // Public users can only see published products.
-    if (
-      !isOwner &&
-      !isStaff &&
-      product.visibility !== "PUBLISHED"
-    ) {
-      throw new HttpError(
-        404,
-        "محصول یافت نشد."
-      );
+      if (
+        !isOwner &&
+        !isStaff &&
+        product.visibility !== "PUBLISHED"
+      ) {
+        throw new HttpError(
+          404,
+          "محصول یافت نشد."
+        );
+      }
+
+      res.json({ product });
+    } catch (err) {
+      next(err);
     }
-
-    res.json({ product });
-  } catch (err) {
-    next(err);
   }
-});
+);
 
 // ---------------------------------------------------------------------
 // Create product
@@ -109,7 +118,8 @@ productsRouter.post(
       await prisma.auditLog.create({
         data: {
           actorId: req.user!.id,
-          sellerId: req.user!.seller!.id,
+          sellerId:
+            req.user!.seller!.id,
           productId: product.id,
           action: "PRODUCT_CREATED",
           entity: "Product",
@@ -118,7 +128,9 @@ productsRouter.post(
         },
       });
 
-      res.status(201).json({ product });
+      res.status(201).json({
+        product,
+      });
     } catch (err) {
       next(err);
     }
@@ -289,7 +301,7 @@ productsRouter.post(
 );
 
 // ---------------------------------------------------------------------
-// 3D / AR models
+// Single 3D / AR model
 // ---------------------------------------------------------------------
 
 productsRouter.post(
@@ -320,6 +332,44 @@ productsRouter.post(
     }
   }
 );
+
+// ---------------------------------------------------------------------
+// ZIP 3D / AR model upload
+// ---------------------------------------------------------------------
+
+productsRouter.post(
+  "/:id/models/zip",
+  requireAuth,
+  requireOwnProduct(),
+  uploadModelZip,
+  async (req, res, next) => {
+    try {
+      if (!req.file) {
+        throw new HttpError(
+          400,
+          "فایل ZIP ارسال نشده است."
+        );
+      }
+
+      const models =
+        await assetService.addProductModelsFromZip(
+          req.params.id,
+          req.file
+        );
+
+      res.status(201).json({
+        models,
+        count: models.length,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------
+// Delete 3D / AR model
+// ---------------------------------------------------------------------
 
 productsRouter.delete(
   "/:id/models/:modelId",
