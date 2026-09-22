@@ -1,5 +1,7 @@
 import unzipper from "unzipper";
 import sharp from "sharp";
+import { createHash } from "node:crypto";
+import { nanoid } from "nanoid";
 import { prisma } from "../config/prisma";
 import { storage } from "../storage";
 import {
@@ -9,8 +11,8 @@ import {
 import { HttpError } from "../middleware/errorHandler";
 
 const MAX_ZIP_ENTRIES = 50;
-const MAX_EXTRACTED_BYTES = 300 * 1024 * 1024; // 300MB
-const MAX_SINGLE_EXTRACTED_FILE = 100 * 1024 * 1024; // 100MB
+const MAX_EXTRACTED_BYTES = 300 * 1024 * 1024;
+const MAX_SINGLE_EXTRACTED_FILE = 100 * 1024 * 1024;
 
 const MODEL_EXTENSIONS = new Set([
   "glb",
@@ -18,34 +20,74 @@ const MODEL_EXTENSIONS = new Set([
   "usdz",
 ]);
 
+const GLTF_DEPENDENCY_EXTENSIONS = new Set([
+  "bin",
+  "png",
+  "jpg",
+  "jpeg",
+  "webp",
+  "ktx2",
+  "basis",
+  "hdr",
+  "exr",
+  "bmp",
+  "tga",
+  "gif",
+]);
+
+const SAFE_ZIP_PATH_PART = /^[a-zA-Z0-9\u0600-\u06FF._-]+$/;
+
 async function assertUploadAllowed(
   productId: string,
   incomingBytes: number
 ): Promise<void> {
+  if (!Number.isFinite(incomingBytes) || incomingBytes < 0) {
+    throw new HttpError(
+      400,
+      "حجم فایل نامعتبر است."
+    );
+  }
+
   const product = await prisma.product.findUnique({
-    where: { id: productId },
-    select: { sellerId: true },
+    where: {
+      id: productId,
+    },
+    select: {
+      sellerId: true,
+    },
   });
 
   if (!product) {
-    throw new HttpError(404, "محصول یافت نشد.");
+    throw new HttpError(
+      404,
+      "محصول یافت نشد."
+    );
   }
 
-  const activeSub = await prisma.subscription.findFirst({
-    where: {
-      sellerId: product.sellerId,
-      status: "ACTIVE",
-      endDate: {
-        gte: new Date(),
+  const now = new Date();
+
+  const activeSub =
+    await prisma.subscription.findFirst({
+      where: {
+        sellerId: product.sellerId,
+        status: "ACTIVE",
+        startDate: {
+          lte: now,
+        },
+        endDate: {
+          gte: now,
+        },
+        plan: {
+          isActive: true,
+        },
       },
-    },
-    include: {
-      plan: true,
-    },
-    orderBy: {
-      endDate: "desc",
-    },
-  });
+      include: {
+        plan: true,
+      },
+      orderBy: {
+        endDate: "desc",
+      },
+    });
 
   if (!activeSub) {
     throw new HttpError(
@@ -57,34 +99,39 @@ async function assertUploadAllowed(
   const storageLimitMb =
     activeSub.plan.storageLimitMb;
 
-  if (!storageLimitMb) {
+  if (
+    storageLimitMb === null ||
+    storageLimitMb === undefined
+  ) {
     return;
   }
 
-  const [imageUsage, modelUsage] =
-    await Promise.all([
-      prisma.productImage.aggregate({
-        where: {
-          product: {
-            sellerId: product.sellerId,
-          },
+  const [
+    imageUsage,
+    modelUsage,
+  ] = await Promise.all([
+    prisma.productImage.aggregate({
+      where: {
+        product: {
+          sellerId: product.sellerId,
         },
-        _sum: {
-          sizeBytes: true,
-        },
-      }),
+      },
+      _sum: {
+        sizeBytes: true,
+      },
+    }),
 
-      prisma.productModel.aggregate({
-        where: {
-          product: {
-            sellerId: product.sellerId,
-          },
+    prisma.productModel.aggregate({
+      where: {
+        product: {
+          sellerId: product.sellerId,
         },
-        _sum: {
-          sizeBytes: true,
-        },
-      }),
-    ]);
+      },
+      _sum: {
+        sizeBytes: true,
+      },
+    }),
+  ]);
 
   const usedBytes =
     (imageUsage._sum.sizeBytes ?? 0) +
@@ -151,47 +198,71 @@ export async function addProductImage(
   productId: string,
   file: Express.Multer.File
 ) {
-  await assertUploadAllowed(
-    productId,
-    file.buffer.length
-  );
+  if (!file?.buffer?.length) {
+    throw new HttpError(
+      400,
+      "فایل تصویر خالی است."
+    );
+  }
 
   await assertValidImage(file.buffer);
 
   const converted =
     await convertImageToWebP(file.buffer);
 
-  const stored = await storage.save({
-    folder: `products/${productId}/images`,
-    filename: `${stripExtension(
-      file.originalname
-    )}.webp`,
-    buffer: converted.buffer,
-    contentType: "image/webp",
-  });
+  await assertUploadAllowed(
+    productId,
+    converted.buffer.length
+  );
 
-  const existingCount =
-    await prisma.productImage.count({
-      where: { productId },
+  const stored =
+    await storage.save({
+      folder: `products/${productId}/images`,
+      filename: `${stripExtension(
+        file.originalname
+      )}.webp`,
+      buffer: converted.buffer,
+      contentType: "image/webp",
     });
 
-  const image =
-    await prisma.productImage.create({
-      data: {
-        productId,
-        url: stored.url,
-        storageKey: stored.storageKey,
-        isPrimary: existingCount === 0,
-        sortOrder: existingCount,
-        width: converted.width ?? null,
-        height: converted.height ?? null,
-        sizeBytes: stored.sizeBytes,
-      },
-    });
+  try {
+    const existingCount =
+      await prisma.productImage.count({
+        where: {
+          productId,
+        },
+      });
 
-  await markUnpublishedIfNeeded(productId);
+    const image =
+      await prisma.productImage.create({
+        data: {
+          productId,
+          url: stored.url,
+          storageKey: stored.storageKey,
+          isPrimary:
+            existingCount === 0,
+          sortOrder: existingCount,
+          width:
+            converted.width ?? null,
+          height:
+            converted.height ?? null,
+          sizeBytes:
+            stored.sizeBytes,
+        },
+      });
 
-  return image;
+    await markUnpublishedIfNeeded(
+      productId
+    );
+
+    return image;
+  } catch (error) {
+    await storage
+      .delete(stored.storageKey)
+      .catch(() => undefined);
+
+    throw error;
+  }
 }
 
 export async function deleteProductImage(
@@ -213,15 +284,15 @@ export async function deleteProductImage(
     );
   }
 
-  await storage
-    .delete(image.storageKey)
-    .catch(() => undefined);
-
   await prisma.productImage.delete({
     where: {
       id: imageId,
     },
   });
+
+  await storage
+    .delete(image.storageKey)
+    .catch(() => undefined);
 
   if (image.isPrimary) {
     const next =
@@ -246,7 +317,9 @@ export async function deleteProductImage(
     }
   }
 
-  await markUnpublishedIfNeeded(productId);
+  await markUnpublishedIfNeeded(
+    productId
+  );
 }
 
 export async function setPrimaryImage(
@@ -288,7 +361,9 @@ export async function setPrimaryImage(
     }),
   ]);
 
-  await markUnpublishedIfNeeded(productId);
+  await markUnpublishedIfNeeded(
+    productId
+  );
 }
 
 export async function reorderImages(
@@ -303,7 +378,9 @@ export async function reorderImages(
     });
 
   const ownedIds = new Set(
-    images.map((image) => image.id)
+    images.map(
+      (image) => image.id
+    )
   );
 
   for (const id of imageIds) {
@@ -325,20 +402,33 @@ export async function reorderImages(
     );
   }
 
+  if (
+    imageIds.length !==
+    images.length
+  ) {
+    throw new HttpError(
+      400,
+      "لیست ترتیب تصاویر باید شامل تمام تصاویر محصول باشد."
+    );
+  }
+
   await prisma.$transaction(
-    imageIds.map((id, index) =>
-      prisma.productImage.update({
-        where: {
-          id,
-        },
-        data: {
-          sortOrder: index,
-        },
-      })
+    imageIds.map(
+      (id, index) =>
+        prisma.productImage.update({
+          where: {
+            id,
+          },
+          data: {
+            sortOrder: index,
+          },
+        })
     )
   );
 
-  await markUnpublishedIfNeeded(productId);
+  await markUnpublishedIfNeeded(
+    productId
+  );
 }
 
 // ---------------------------------------------------------------------
@@ -349,50 +439,82 @@ export async function addProductModel(
   productId: string,
   file: Express.Multer.File
 ) {
+  if (!file?.buffer?.length) {
+    throw new HttpError(
+      400,
+      "فایل سه‌بعدی خالی است."
+    );
+  }
+
+  const kind =
+    await assertValidModel(
+      file.buffer,
+      file.originalname
+    );
+
   await assertUploadAllowed(
     productId,
     file.buffer.length
   );
 
-  const kind = await assertValidModel(
-    file.buffer,
-    file.originalname
-  );
-
-  const stored = await storage.save({
-    folder: `products/${productId}/models`,
-    filename: file.originalname,
-    buffer: file.buffer,
-    contentType:
-      file.mimetype ||
-      "application/octet-stream",
-  });
-
-  const model =
-    await prisma.productModel.create({
-      data: {
-        productId,
-        kind,
-        url: stored.url,
-        storageKey: stored.storageKey,
-        sizeBytes: stored.sizeBytes,
-      },
+  const stored =
+    await storage.save({
+      folder: `products/${productId}/models`,
+      filename: file.originalname,
+      buffer: file.buffer,
+      contentType:
+        getModelContentType(kind),
     });
 
-  await markUnpublishedIfNeeded(productId);
+  try {
+    const model =
+      await prisma.productModel.create({
+        data: {
+          productId,
+          kind,
+          url: stored.url,
+          storageKey:
+            stored.storageKey,
+          sizeBytes:
+            stored.sizeBytes,
+        },
+      });
 
-  return model;
+    await markUnpublishedIfNeeded(
+      productId
+    );
+
+    return model;
+  } catch (error) {
+    await storage
+      .delete(stored.storageKey)
+      .catch(() => undefined);
+
+    throw error;
+  }
 }
 
 // ---------------------------------------------------------------------
 // ZIP model upload
 // ---------------------------------------------------------------------
 
+interface ZipEntryCandidate {
+  filename: string;
+  buffer: Buffer;
+  extension: string;
+  isModel: boolean;
+}
+
+interface GltfPackage {
+  model: ZipEntryCandidate;
+  dependencies: ZipEntryCandidate[];
+}
+
 export async function addProductModelsFromZip(
   productId: string,
   file: Express.Multer.File
 ) {
-  if (!file.buffer?.length) {
+  if (!file?.buffer?.length) {
     throw new HttpError(
       400,
       "فایل ZIP خالی است."
@@ -400,9 +522,13 @@ export async function addProductModelsFromZip(
   }
 
   const directory =
-    await unzipper.Open.buffer(file.buffer);
+    await unzipper.Open.buffer(
+      file.buffer
+    );
 
-  if (directory.files.length === 0) {
+  if (
+    directory.files.length === 0
+  ) {
     throw new HttpError(
       400,
       "فایل ZIP خالی است."
@@ -419,11 +545,8 @@ export async function addProductModelsFromZip(
     );
   }
 
-  const candidates: Array<{
-    filename: string;
-    buffer: Buffer;
-    kind: string;
-  }> = [];
+  const entries: ZipEntryCandidate[] =
+    [];
 
   let totalExtractedBytes = 0;
 
@@ -433,7 +556,9 @@ export async function addProductModelsFromZip(
     }
 
     const safePath =
-      sanitizeZipEntryPath(entry.path);
+      sanitizeZipEntryPath(
+        entry.path
+      );
 
     if (!safePath) {
       throw new HttpError(
@@ -445,37 +570,38 @@ export async function addProductModelsFromZip(
     const extension =
       getExtension(safePath);
 
-    // ZIP may contain thumbnails, textures or metadata.
-    // Only model files are imported into ProductModel.
+    const isModel =
+      MODEL_EXTENSIONS.has(
+        extension
+      );
+
+    const isDependency =
+      GLTF_DEPENDENCY_EXTENSIONS.has(
+        extension
+      );
+
     if (
-      !MODEL_EXTENSIONS.has(extension)
+      !isModel &&
+      !isDependency
     ) {
       continue;
     }
 
-    const uncompressedSize =
-      Number(entry.uncompressedSize ?? 0);
+    const declaredSize =
+      Number(
+        entry.uncompressedSize ?? 0
+      );
 
     if (
-      uncompressedSize >
-      MAX_SINGLE_EXTRACTED_FILE
+      Number.isFinite(
+        declaredSize
+      ) &&
+      declaredSize >
+        MAX_SINGLE_EXTRACTED_FILE
     ) {
       throw new HttpError(
         400,
         `فایل ${safePath} پس از استخراج بیش از 100MB خواهد بود.`
-      );
-    }
-
-    totalExtractedBytes +=
-      uncompressedSize;
-
-    if (
-      totalExtractedBytes >
-      MAX_EXTRACTED_BYTES
-    ) {
-      throw new HttpError(
-        400,
-        "حجم فایل‌های استخراج‌شده از ZIP بیش از حد مجاز است."
       );
     }
 
@@ -492,73 +618,148 @@ export async function addProductModelsFromZip(
       );
     }
 
-    const kind =
-      await assertValidModel(
-        buffer,
-        safePath
-      );
+    totalExtractedBytes +=
+      buffer.length;
 
-    candidates.push({
+    if (
+      totalExtractedBytes >
+      MAX_EXTRACTED_BYTES
+    ) {
+      throw new HttpError(
+        400,
+        "حجم فایل‌های استخراج‌شده از ZIP بیش از حد مجاز است."
+      );
+    }
+
+    entries.push({
       filename: safePath,
       buffer,
-      kind,
+      extension,
+      isModel,
     });
   }
 
-  if (candidates.length === 0) {
+  const modelEntries =
+    entries.filter(
+      (entry) => entry.isModel
+    );
+
+  if (
+    modelEntries.length === 0
+  ) {
     throw new HttpError(
       400,
       "داخل ZIP هیچ فایل GLB، GLTF یا USDZ معتبری پیدا نشد."
     );
   }
 
+  /*
+   * Validate every model before writing anything to storage.
+   */
+  for (const model of modelEntries) {
+    await assertValidModel(
+      model.buffer,
+      model.filename
+    );
+  }
+
+  const packages =
+    buildGltfPackages(entries);
+
+  const incomingStorageBytes =
+    calculatePackageStorageBytes(
+      packages
+    );
+
   await assertUploadAllowed(
     productId,
-    candidates.reduce(
-      (sum, item) =>
-        sum + item.buffer.length,
-      0
-    )
+    incomingStorageBytes
   );
 
-  const createdModels = [];
+  const createdModels: Array<{
+    id: string;
+    storageKey: string;
+  }> = [];
+
+  const createdStorageKeys: string[] =
+    [];
 
   try {
-    for (const item of candidates) {
-      const stored =
+    for (const pkg of packages) {
+      const modelFolder =
+        `products/${productId}/models/${nanoid(16)}`;
+
+      /*
+       * GLTF packages keep their internal relative paths.
+       *
+       * Example:
+       *   scene.gltf
+       *   scene.bin
+       *   textures/albedo.png
+       *
+       * All are stored under the same model folder so the .gltf file
+       * can continue using its relative references.
+       */
+      for (const dependency of
+        pkg.dependencies) {
+        const stored =
+          await storage.save({
+            folder: modelFolder,
+            filename:
+              dependency.filename,
+            buffer:
+              dependency.buffer,
+            contentType:
+              getDependencyContentType(
+                dependency.extension
+              ),
+          });
+
+        createdStorageKeys.push(
+          stored.storageKey
+        );
+      }
+
+      const modelStored =
         await storage.save({
-          folder: `products/${productId}/models`,
-          filename: item.filename,
-          buffer: item.buffer,
+          folder: modelFolder,
+          filename: pkg.model.filename,
+          buffer: pkg.model.buffer,
           contentType:
             getModelContentType(
-              item.kind
+              pkg.model.extension
             ),
         });
+
+      createdStorageKeys.push(
+        modelStored.storageKey
+      );
 
       const model =
         await prisma.productModel.create({
           data: {
             productId,
-            kind: item.kind,
-            url: stored.url,
+            kind:
+              getModelKind(
+                pkg.model.extension
+              ),
+            url:
+              modelStored.url,
             storageKey:
-              stored.storageKey,
+              modelStored.storageKey,
             sizeBytes:
-              stored.sizeBytes,
+              calculatePackageSize(pkg),
           },
         });
 
-      createdModels.push(model);
+      createdModels.push({
+        id: model.id,
+        storageKey:
+          modelStored.storageKey,
+      });
     }
   } catch (error) {
-    // If one file fails after previous files were stored,
-    // remove the already-created assets to avoid orphaned files.
     for (const model of createdModels) {
-      await storage
-        .delete(model.storageKey)
-        .catch(() => undefined);
-
       await prisma.productModel
         .delete({
           where: {
@@ -568,12 +769,32 @@ export async function addProductModelsFromZip(
         .catch(() => undefined);
     }
 
+    for (const storageKey of
+      createdStorageKeys) {
+      await storage
+        .delete(storageKey)
+        .catch(() => undefined);
+    }
+
     throw error;
   }
 
-  await markUnpublishedIfNeeded(productId);
+  await markUnpublishedIfNeeded(
+    productId
+  );
 
-  return createdModels;
+  return await prisma.productModel.findMany({
+    where: {
+      id: {
+        in: createdModels.map(
+          (model) => model.id
+        ),
+      },
+    },
+    orderBy: {
+      createdAt: "asc",
+    },
+  });
 }
 
 // ---------------------------------------------------------------------
@@ -599,54 +820,251 @@ export async function deleteProductModel(
     );
   }
 
-  await storage
-    .delete(model.storageKey)
-    .catch(() => undefined);
-
   await prisma.productModel.delete({
     where: {
       id: modelId,
     },
   });
 
-  await markUnpublishedIfNeeded(productId);
+  await storage
+    .delete(model.storageKey)
+    .catch(() => undefined);
+
+  await markUnpublishedIfNeeded(
+    productId
+  );
 }
 
 // ---------------------------------------------------------------------
-// Helpers
+// ZIP / GLTF helpers
+// ---------------------------------------------------------------------
+
+function buildGltfPackages(
+  entries: ZipEntryCandidate[]
+): GltfPackage[] {
+  const models =
+    entries.filter(
+      (entry) => entry.isModel
+    );
+
+  const dependencies =
+    entries.filter(
+      (entry) => !entry.isModel
+    );
+
+  const packages: GltfPackage[] =
+    [];
+
+  for (const model of models) {
+    const extension =
+      model.extension;
+
+    /*
+     * GLB and USDZ are self-contained.
+     */
+    if (
+      extension === "glb" ||
+      extension === "usdz"
+    ) {
+      packages.push({
+        model,
+        dependencies: [],
+      });
+
+      continue;
+    }
+
+    /*
+     * GLTF may reference .bin and textures.
+     *
+     * When there is only one GLTF model in the ZIP, all compatible
+     * dependencies are associated with it.
+     *
+     * When multiple GLTF models exist, dependencies are assigned
+     * according to their relative directory.
+     */
+    const modelDirectory =
+      getDirectory(model.filename);
+
+    const related =
+      dependencies.filter(
+        (dependency) =>
+          isPathInsideDirectory(
+            dependency.filename,
+            modelDirectory
+          )
+      );
+
+    packages.push({
+      model,
+      dependencies: related,
+    });
+  }
+
+  return packages;
+}
+
+function calculatePackageStorageBytes(
+  packages: GltfPackage[]
+): number {
+  return packages.reduce(
+    (sum, pkg) =>
+      sum +
+      calculatePackageSize(pkg),
+    0
+  );
+}
+
+function calculatePackageSize(
+  pkg: GltfPackage
+): number {
+  return [
+    pkg.model,
+    ...pkg.dependencies,
+  ].reduce(
+    (sum, entry) =>
+      sum + entry.buffer.length,
+    0
+  );
+}
+
+function getDirectory(
+  pathname: string
+): string {
+  const normalized =
+    pathname.replace(
+      /\\/g,
+      "/"
+    );
+
+  const slash =
+    normalized.lastIndexOf("/");
+
+  if (slash < 0) {
+    return "";
+  }
+
+  return normalized.slice(
+    0,
+    slash
+  );
+}
+
+function isPathInsideDirectory(
+  pathname: string,
+  directory: string
+): boolean {
+  if (!directory) {
+    return true;
+  }
+
+  const normalized =
+    pathname.replace(
+      /\\/g,
+      "/"
+    );
+
+  return (
+    normalized ===
+      directory ||
+    normalized.startsWith(
+      `${directory}/`
+    )
+  );
+}
+
+function getDependencyContentType(
+  extension: string
+): string {
+  switch (extension) {
+    case "bin":
+      return "application/octet-stream";
+
+    case "png":
+      return "image/png";
+
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+
+    case "webp":
+      return "image/webp";
+
+    case "ktx2":
+      return "image/ktx2";
+
+    case "hdr":
+      return "image/vnd.radiance";
+
+    case "exr":
+      return "image/x-exr";
+
+    case "bmp":
+      return "image/bmp";
+
+    case "gif":
+      return "image/gif";
+
+    case "tga":
+      return "image/x-tga";
+
+    default:
+      return "application/octet-stream";
+  }
+}
+
+// ---------------------------------------------------------------------
+// Security / validation helpers
 // ---------------------------------------------------------------------
 
 function sanitizeZipEntryPath(
   entryPath: string
 ): string | null {
   const normalized =
-    entryPath.replace(/\\/g, "/");
+    entryPath
+      .replace(
+        /\\/g,
+        "/"
+      )
+      .replace(
+        /\0/g,
+        ""
+      );
 
   if (
+    !normalized ||
     normalized.startsWith("/") ||
     normalized.startsWith("\\") ||
-    /^[a-zA-Z]:\//.test(normalized)
-  ) {
-    return null;
-  }
-
-  const parts = normalized.split("/");
-
-  if (
-    parts.some(
-      (part) =>
-        part === ".." ||
-        part === "."
+    /^[a-zA-Z]:\//.test(
+      normalized
     )
   ) {
     return null;
   }
 
-  const clean = parts
-    .filter(Boolean)
-    .join("/");
+  const parts =
+    normalized.split("/");
 
-  if (!clean) {
+  if (
+    parts.some(
+      (part) =>
+        !part ||
+        part === "." ||
+        part === ".." ||
+        !SAFE_ZIP_PATH_PART.test(
+          part
+        )
+    )
+  ) {
+    return null;
+  }
+
+  const clean =
+    parts.join("/");
+
+  if (
+    clean.length > 500
+  ) {
     return null;
   }
 
@@ -659,13 +1077,38 @@ function getExtension(
   const dot =
     filename.lastIndexOf(".");
 
-  if (dot < 0) {
+  if (
+    dot <= 0 ||
+    dot ===
+      filename.length - 1
+  ) {
     return "";
   }
 
   return filename
     .slice(dot + 1)
     .toLowerCase();
+}
+
+function getModelKind(
+  extension: string
+): string {
+  switch (extension) {
+    case "glb":
+      return "GLB";
+
+    case "gltf":
+      return "GLTF";
+
+    case "usdz":
+      return "USDZ";
+
+    default:
+      throw new HttpError(
+        400,
+        "فرمت مدل سه‌بعدی پشتیبانی نمی‌شود."
+      );
+  }
 }
 
 function getModelContentType(
@@ -697,12 +1140,15 @@ function stripExtension(
   }
 
   const name =
-    filename.slice(0, lastDot);
+    filename.slice(
+      0,
+      lastDot
+    );
 
   return (
     name
       .replace(
-        /[^a-zA-Z0-9\u0600-\u06FF_-]+/g,
+        /[^a-zA-Z0-9\u0600-\u06FF._-]+/g,
         "-"
       )
       .replace(
@@ -716,25 +1162,14 @@ function stripExtension(
 
 async function markUnpublishedIfNeeded(
   productId: string
-) {
-  const product =
-    await prisma.product.findUnique({
-      where: {
-        id: productId,
-      },
-    });
-
-  if (
-    product?.visibility ===
-    "PUBLISHED"
-  ) {
-    await prisma.product.update({
-      where: {
-        id: productId,
-      },
-      data: {
-        hasUnpublishedChanges: true,
-      },
-    });
-  }
+): Promise<void> {
+  await prisma.product.updateMany({
+    where: {
+      id: productId,
+      visibility: "PUBLISHED",
+    },
+    data: {
+      hasUnpublishedChanges: true,
+    },
+  });
 }
