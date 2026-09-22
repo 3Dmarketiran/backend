@@ -23,39 +23,76 @@ import { prisma } from "../config/prisma";
 
 export const productsRouter = Router();
 
+function assertRouteId(
+  value: string | undefined,
+  message = "شناسه نامعتبر است."
+): string {
+  const id = value?.trim();
+
+  if (!id) {
+    throw new HttpError(400, message);
+  }
+
+  return id;
+}
+
+function isStaffRole(
+  role: string | undefined
+): boolean {
+  return (
+    role === "ADMIN" ||
+    role === "SUPER_ADMIN"
+  );
+}
+
 // ---------------------------------------------------------------------
 // Product listing
 // ---------------------------------------------------------------------
 
-productsRouter.get("/", async (req, res, next) => {
-  try {
-    const query = listProductsQuerySchema.parse(req.query);
+productsRouter.get(
+  "/",
+  async (req, res, next) => {
+    try {
+      const query =
+        listProductsQuerySchema.parse(
+          req.query
+        );
 
-    const isStaffOrSeller =
-      req.user?.role === "ADMIN" ||
-      req.user?.role === "SUPER_ADMIN" ||
-      req.user?.role === "SELLER";
+      const isStaffOrSeller =
+        isStaffRole(req.user?.role) ||
+        req.user?.role === "SELLER";
 
-    if (
-      req.user?.role === "SELLER" &&
-      req.user.seller
-    ) {
-      query.sellerId = req.user.seller.id;
-    }
+      if (
+        req.user?.role === "SELLER"
+      ) {
+        const sellerId =
+          req.user.seller?.id;
 
-    const result =
-      await productService.listProducts(
-        query,
-        {
-          publicOnly: !isStaffOrSeller,
+        if (!sellerId) {
+          throw new HttpError(
+            403,
+            "حساب فروشنده به پروفایل فروشگاه متصل نیست."
+          );
         }
-      );
 
-    res.json(result);
-  } catch (err) {
-    next(err);
+        query.sellerId = sellerId;
+      }
+
+      const result =
+        await productService.listProducts(
+          query,
+          {
+            publicOnly:
+              !isStaffOrSeller,
+          }
+        );
+
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
   }
-});
+);
 
 // ---------------------------------------------------------------------
 // Single product
@@ -65,9 +102,15 @@ productsRouter.get(
   "/:id",
   async (req, res, next) => {
     try {
+      const productId =
+        assertRouteId(
+          req.params.id,
+          "شناسه محصول نامعتبر است."
+        );
+
       const product =
         await productService.getProductById(
-          req.params.id
+          productId
         );
 
       const isOwner =
@@ -75,13 +118,15 @@ productsRouter.get(
         product.sellerId;
 
       const isStaff =
-        req.user?.role === "ADMIN" ||
-        req.user?.role === "SUPER_ADMIN";
+        isStaffRole(
+          req.user?.role
+        );
 
       if (
         !isOwner &&
         !isStaff &&
-        product.visibility !== "PUBLISHED"
+        product.visibility !==
+          "PUBLISHED"
       ) {
         throw new HttpError(
           404,
@@ -89,7 +134,9 @@ productsRouter.get(
         );
       }
 
-      res.json({ product });
+      res.json({
+        product,
+      });
     } catch (err) {
       next(err);
     }
@@ -106,20 +153,31 @@ productsRouter.post(
   requireSeller,
   async (req, res, next) => {
     try {
+      const sellerId =
+        req.user?.seller?.id;
+
+      if (!sellerId) {
+        throw new HttpError(
+          403,
+          "حساب فروشنده به پروفایل فروشگاه متصل نیست."
+        );
+      }
+
       const input =
-        createProductSchema.parse(req.body);
+        createProductSchema.parse(
+          req.body
+        );
 
       const product =
         await productService.createProduct(
-          req.user!.seller!.id,
+          sellerId,
           input
         );
 
       await prisma.auditLog.create({
         data: {
           actorId: req.user!.id,
-          sellerId:
-            req.user!.seller!.id,
+          sellerId,
           productId: product.id,
           action: "PRODUCT_CREATED",
           entity: "Product",
@@ -147,12 +205,20 @@ productsRouter.put(
   requireOwnProduct(),
   async (req, res, next) => {
     try {
+      const productId =
+        assertRouteId(
+          req.params.id,
+          "شناسه محصول نامعتبر است."
+        );
+
       const input =
-        updateProductSchema.parse(req.body);
+        updateProductSchema.parse(
+          req.body
+        );
 
       const product =
         await productService.updateProduct(
-          req.params.id,
+          productId,
           input
         );
 
@@ -168,7 +234,9 @@ productsRouter.put(
         },
       });
 
-      res.json({ product });
+      res.json({
+        product,
+      });
     } catch (err) {
       next(err);
     }
@@ -185,16 +253,29 @@ productsRouter.delete(
   requireOwnProduct(),
   async (req, res, next) => {
     try {
+      const productId =
+        assertRouteId(
+          req.params.id,
+          "شناسه محصول نامعتبر است."
+        );
+
+      const existing =
+        await productService.getProductById(
+          productId
+        );
+
       await productService.deleteProduct(
-        req.params.id
+        productId
       );
 
       await prisma.auditLog.create({
         data: {
           actorId: req.user!.id,
+          sellerId:
+            existing.sellerId,
           action: "PRODUCT_DELETED",
           entity: "Product",
-          entityId: req.params.id,
+          entityId: productId,
           ipAddress: req.ip,
         },
       });
@@ -217,6 +298,12 @@ productsRouter.post(
   uploadImage,
   async (req, res, next) => {
     try {
+      const productId =
+        assertRouteId(
+          req.params.id,
+          "شناسه محصول نامعتبر است."
+        );
+
       if (!req.file) {
         throw new HttpError(
           400,
@@ -226,9 +313,20 @@ productsRouter.post(
 
       const image =
         await assetService.addProductImage(
-          req.params.id,
+          productId,
           req.file
         );
+
+      await prisma.auditLog.create({
+        data: {
+          actorId: req.user!.id,
+          productId,
+          action: "PRODUCT_IMAGE_ADDED",
+          entity: "ProductImage",
+          entityId: image.id,
+          ipAddress: req.ip,
+        },
+      });
 
       res.status(201).json({
         image,
@@ -245,10 +343,33 @@ productsRouter.delete(
   requireOwnProduct(),
   async (req, res, next) => {
     try {
+      const productId =
+        assertRouteId(
+          req.params.id,
+          "شناسه محصول نامعتبر است."
+        );
+
+      const imageId =
+        assertRouteId(
+          req.params.imageId,
+          "شناسه تصویر نامعتبر است."
+        );
+
       await assetService.deleteProductImage(
-        req.params.id,
-        req.params.imageId
+        productId,
+        imageId
       );
+
+      await prisma.auditLog.create({
+        data: {
+          actorId: req.user!.id,
+          productId,
+          action: "PRODUCT_IMAGE_DELETED",
+          entity: "ProductImage",
+          entityId: imageId,
+          ipAddress: req.ip,
+        },
+      });
 
       res.status(204).send();
     } catch (err) {
@@ -263,10 +384,33 @@ productsRouter.post(
   requireOwnProduct(),
   async (req, res, next) => {
     try {
+      const productId =
+        assertRouteId(
+          req.params.id,
+          "شناسه محصول نامعتبر است."
+        );
+
+      const imageId =
+        assertRouteId(
+          req.params.imageId,
+          "شناسه تصویر نامعتبر است."
+        );
+
       await assetService.setPrimaryImage(
-        req.params.id,
-        req.params.imageId
+        productId,
+        imageId
       );
+
+      await prisma.auditLog.create({
+        data: {
+          actorId: req.user!.id,
+          productId,
+          action: "PRODUCT_IMAGE_PRIMARY_CHANGED",
+          entity: "ProductImage",
+          entityId: imageId,
+          ipAddress: req.ip,
+        },
+      });
 
       res.json({
         success: true,
@@ -283,13 +427,32 @@ productsRouter.post(
   requireOwnProduct(),
   async (req, res, next) => {
     try {
+      const productId =
+        assertRouteId(
+          req.params.id,
+          "شناسه محصول نامعتبر است."
+        );
+
       const { imageIds } =
-        reorderImagesSchema.parse(req.body);
+        reorderImagesSchema.parse(
+          req.body
+        );
 
       await assetService.reorderImages(
-        req.params.id,
+        productId,
         imageIds
       );
+
+      await prisma.auditLog.create({
+        data: {
+          actorId: req.user!.id,
+          productId,
+          action: "PRODUCT_IMAGES_REORDERED",
+          entity: "Product",
+          entityId: productId,
+          ipAddress: req.ip,
+        },
+      });
 
       res.json({
         success: true,
@@ -311,6 +474,12 @@ productsRouter.post(
   uploadModel,
   async (req, res, next) => {
     try {
+      const productId =
+        assertRouteId(
+          req.params.id,
+          "شناسه محصول نامعتبر است."
+        );
+
       if (!req.file) {
         throw new HttpError(
           400,
@@ -320,9 +489,20 @@ productsRouter.post(
 
       const model =
         await assetService.addProductModel(
-          req.params.id,
+          productId,
           req.file
         );
+
+      await prisma.auditLog.create({
+        data: {
+          actorId: req.user!.id,
+          productId,
+          action: "PRODUCT_MODEL_ADDED",
+          entity: "ProductModel",
+          entityId: model.id,
+          ipAddress: req.ip,
+        },
+      });
 
       res.status(201).json({
         model,
@@ -344,6 +524,12 @@ productsRouter.post(
   uploadModelZip,
   async (req, res, next) => {
     try {
+      const productId =
+        assertRouteId(
+          req.params.id,
+          "شناسه محصول نامعتبر است."
+        );
+
       if (!req.file) {
         throw new HttpError(
           400,
@@ -353,9 +539,20 @@ productsRouter.post(
 
       const models =
         await assetService.addProductModelsFromZip(
-          req.params.id,
+          productId,
           req.file
         );
+
+      await prisma.auditLog.create({
+        data: {
+          actorId: req.user!.id,
+          productId,
+          action: "PRODUCT_MODELS_ZIP_ADDED",
+          entity: "Product",
+          entityId: productId,
+          ipAddress: req.ip,
+        },
+      });
 
       res.status(201).json({
         models,
@@ -377,10 +574,33 @@ productsRouter.delete(
   requireOwnProduct(),
   async (req, res, next) => {
     try {
+      const productId =
+        assertRouteId(
+          req.params.id,
+          "شناسه محصول نامعتبر است."
+        );
+
+      const modelId =
+        assertRouteId(
+          req.params.modelId,
+          "شناسه مدل نامعتبر است."
+        );
+
       await assetService.deleteProductModel(
-        req.params.id,
-        req.params.modelId
+        productId,
+        modelId
       );
+
+      await prisma.auditLog.create({
+        data: {
+          actorId: req.user!.id,
+          productId,
+          action: "PRODUCT_MODEL_DELETED",
+          entity: "ProductModel",
+          entityId: modelId,
+          ipAddress: req.ip,
+        },
+      });
 
       res.status(204).send();
     } catch (err) {
@@ -399,9 +619,15 @@ productsRouter.post(
   requireAdmin,
   async (req, res, next) => {
     try {
+      const productId =
+        assertRouteId(
+          req.params.id,
+          "شناسه محصول نامعتبر است."
+        );
+
       const product =
         await productService.updateProduct(
-          req.params.id,
+          productId,
           {
             visibility: "HIDDEN",
           }
@@ -411,6 +637,7 @@ productsRouter.post(
         data: {
           actorId: req.user!.id,
           productId: product.id,
+          sellerId: product.sellerId,
           action: "PRODUCT_FORCE_HIDDEN",
           entity: "Product",
           entityId: product.id,
@@ -426,3 +653,5 @@ productsRouter.post(
     }
   }
 );
+
+export default productsRouter;
