@@ -1,4 +1,5 @@
 import multer from "multer";
+import type { NextFunction, Request, Response } from "express";
 import { fromBuffer } from "file-type";
 import { HttpError } from "../middleware/errorHandler";
 
@@ -44,12 +45,66 @@ export const uploadModelZip = multer({
   },
 }).single("modelZip");
 
-export const uploadLogo = multer({
+// Logo upload middleware.
+//
+// This is intentionally wrapped instead of exporting multer().single()
+// directly so Multer errors and the actual image validation are handled
+// before the request reaches the seller route.
+const logoUpload = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: MAX_LOGO_BYTES,
   },
 }).single("logo");
+
+export const uploadLogo = (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): void => {
+  logoUpload(req, res, async (err: unknown) => {
+    if (err) {
+      if (
+        err instanceof multer.MulterError &&
+        err.code === "LIMIT_FILE_SIZE"
+      ) {
+        return next(
+          new HttpError(
+            413,
+            "حجم لوگو نباید بیشتر از ۵ مگابایت باشد."
+          )
+        );
+      }
+
+      if (err instanceof multer.MulterError) {
+        return next(
+          new HttpError(
+            400,
+            "آپلود لوگو نامعتبر است."
+          )
+        );
+      }
+
+      return next(err);
+    }
+
+    if (!req.file) {
+      return next(
+        new HttpError(
+          400,
+          "فایل لوگو ارسال نشده است."
+        )
+      );
+    }
+
+    try {
+      await assertValidLogo(req.file.buffer);
+      next();
+    } catch (validationError) {
+      next(validationError);
+    }
+  });
+};
 
 // ---------------------------------------------------------------------
 // Image validation
@@ -58,6 +113,13 @@ export const uploadLogo = multer({
 export async function assertValidImage(
   buffer: Buffer
 ): Promise<void> {
+  if (!buffer || buffer.length === 0) {
+    throw new HttpError(
+      400,
+      "فایل تصویر خالی است."
+    );
+  }
+
   const type = await fromBuffer(buffer);
 
   if (
@@ -109,6 +171,13 @@ export async function assertValidModel(
   // ---------------------------------------------------------------
 
   if (ext === "glb") {
+    if (buffer.length < 12) {
+      throw new HttpError(
+        400,
+        "فایل GLB ناقص یا نامعتبر است."
+      );
+    }
+
     const magic =
       buffer
         .subarray(0, 4)
@@ -121,17 +190,6 @@ export async function assertValidModel(
       );
     }
 
-    if (buffer.length < 12) {
-      throw new HttpError(
-        400,
-        "فایل GLB ناقص یا نامعتبر است."
-      );
-    }
-
-    // glTF binary header:
-    // bytes 0-3  = magic
-    // bytes 4-7  = version
-    // bytes 8-11 = total length
     const version =
       buffer.readUInt32LE(4);
 
@@ -196,12 +254,6 @@ export async function assertValidModel(
       );
     }
 
-    // USDZ is based on ZIP container structure.
-    // ZIP local file header:
-    // PK\x03\x04
-    //
-    // Some valid ZIP files may begin with an empty archive
-    // signature instead, so accept the standard ZIP signatures.
     const isZip =
       (
         buffer[0] === 0x50 &&
