@@ -13,19 +13,6 @@ function normalizeSlashes(value: string): string {
   return value.replace(/\\/g, "/");
 }
 
-function assertSafeSegment(value: string, fieldName: string): void {
-  if (
-    !value ||
-    value === "." ||
-    value === ".." ||
-    value.includes("/") ||
-    value.includes("\\") ||
-    !SAFE_SEGMENT.test(value)
-  ) {
-    throw new Error(`Invalid ${fieldName}.`);
-  }
-}
-
 function sanitizeFilename(filename: string): string {
   const normalized = normalizeSlashes(filename).split("/").pop() || "";
 
@@ -126,7 +113,10 @@ export class LocalStorageProvider implements StorageProvider {
       .map((segment) => encodeURIComponent(segment))
       .join("/");
 
-    const baseUrl = env.PUBLIC_ASSET_BASE_URL.replace(/\/+$/, "");
+    const baseUrl = (
+      env.PUBLIC_ASSET_BASE_URL ??
+      `http://localhost:${env.PORT}/files`
+    ).replace(/\/+$/, "");
 
     return `${baseUrl}/${encodedPath}`;
   }

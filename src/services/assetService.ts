@@ -1,6 +1,5 @@
 import unzipper from "unzipper";
 import sharp from "sharp";
-import { createHash } from "node:crypto";
 import { nanoid } from "nanoid";
 import { prisma } from "../config/prisma";
 import { storage } from "../storage";

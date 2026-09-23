@@ -24,7 +24,7 @@ import { sellersRouter } from "./routes/sellers";
 import { subscriptionsRouter } from "./routes/subscriptions";
 import { categoriesRouter } from "./routes/categories";
 import { analyticsRouter } from "./routes/analytics";
-import { adminRouter } from "./routes/admin";
+import { adminSettingsRouter } from "./routes/adminSettings";
 import { publishingRouter } from "./routes/publishing";
 
 import { expireOverdueSubscriptions } from "./routes/subscriptions";
@@ -223,7 +223,7 @@ app.use("/api/sellers", sellersRouter);
 app.use("/api/subscriptions", subscriptionsRouter);
 app.use("/api/categories", categoriesRouter);
 app.use("/api/analytics", analyticsRouter);
-app.use("/api/admin", adminRouter);
+app.use("/api/admin", adminSettingsRouter);
 app.use("/api/publishing", publishingRouter);
 
 /* -------------------------------------------------------------------------- */

@@ -93,18 +93,6 @@ function serializeSubscription(
   };
 }
 
-function isPrismaErrorCode(
-  err: unknown,
-  code: string
-): boolean {
-  return (
-    err instanceof Error &&
-    "code" in err &&
-    (err as { code?: string })
-      .code === code
-  );
-}
-
 // ---------------------------------------------------------------------
 // Plans
 // ---------------------------------------------------------------------

@@ -95,3 +95,30 @@ Health Check Path رو به /api/health/live تغییر بدید (نه /api/heal
 یعنی npx prisma هیچ نسخه‌ی محلی/پین‌شده‌ای برای اجرا نداشت و به یک نسخه‌ی
 نامشخص/ناسازگار برمی‌خورد. رفع شد: "prisma": "5.22.0" (هم‌نسخه با @prisma/client)
 به devDependencies اضافه شد.
+
+## به‌روزرسانی: رفع خطاهای واقعی TypeScript که بعد از فیکس prisma آشکار شدن
+بعد از رفع مشکل prisma CLI، بیلد یک قدم جلوتر رفت و به مرحله‌ی `tsc` رسید — که چند
+باگ واقعی و از قبل موجود در کد رو آشکار کرد (نه چیزی که من اضافه کرده باشم):
+
+1. **`src/routes/admin.ts` اصلاً وجود نداشت.** `index.ts` سعی می‌کرد `adminRouter` رو از
+   این مسیر ایمپورت کنه، ولی فایل واقعی `src/routes/adminSettings.ts` بود که
+   `adminSettingsRouter` رو export می‌کرد. یعنی **کل مسیر `/api/admin`
+   (برندینگ، وضعیت GitHub، لاگ‌های audit) هیچ‌وقت واقعاً mount نشده بود.** رفع شد.
+2. `src/routes/auth.ts` به‌جای named export (`export const authRouter`) از
+   `export default router` استفاده می‌کرد، در حالی که `index.ts` انتظار named import
+   داشت. برای هماهنگی با بقیه‌ی روت‌های پروژه به named export تبدیل شد.
+3. چند import/متغیر استفاده‌نشده (`env` در auth.ts، `isPrismaErrorCode` در
+   subscriptions.ts، `createHash` و `assertSafeSegment`) که به‌خاطر تنظیمات سخت‌گیرانه‌ی
+   TypeScript (`noUnusedLocals`) باعث fail شدن build می‌شدن، حذف شدن.
+4. نبود type declaration برای پکیج `unzipper` → `@types/unzipper` اضافه شد.
+5. **باگ واقعی منطقی:** تابع `isSubscriptionCurrentlyActive` (در sellers.ts و
+   productService.ts) فرض می‌کرد `startDate`/`endDate` هیچ‌وقت null نیستن، در حالی
+   که این دو فیلد در دیتابیس واقعاً nullable هستن (یک اشتراک PENDING هنوز تاریخ
+   شروع/پایان نداره). این می‌تونست باعث خطای runtime بشه، نه فقط خطای کامپایل.
+   اصلاح شد تا صریحاً null رو به‌عنوان «غیرفعال» در نظر بگیره.
+6. تایپ `inputUnit` محصول (که در دیتابیس فقط یک `String?` ساده است) با یونیون
+   دقیق‌تر `"MM" | "CM" | "M" | null` که در منطق ابعاد محصول انتظار می‌رفت مطابقت
+   نداشت؛ یک تابع کمکی اعتبارسنجی (`toDimensionUnit`) اضافه شد.
+7. `env.PUBLIC_ASSET_BASE_URL` در حالت local storage می‌تونه undefined باشه (فقط در
+   production الزامیه)؛ یک مقدار پیش‌فرض منطقی (`http://localhost:PORT/files`)
+   برای همین حالت اضافه شد.

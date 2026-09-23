@@ -56,6 +56,16 @@ async function assertCategoryCanBeUsed(
   }
 }
 
+type DimensionUnit = "MM" | "CM" | "M";
+
+function toDimensionUnit(
+  value: string | null | undefined
+): DimensionUnit | null {
+  return value === "MM" || value === "CM" || value === "M"
+    ? value
+    : null;
+}
+
 function buildDimensions(
   input: {
     width?: number;
@@ -124,8 +134,8 @@ function buildDimensions(
 function isSubscriptionCurrentlyActive(
   subscription: {
     status: string;
-    startDate: Date;
-    endDate: Date;
+    startDate: Date | null;
+    endDate: Date | null;
     plan?: {
       isActive?: boolean;
     } | null;
@@ -134,6 +144,8 @@ function isSubscriptionCurrentlyActive(
 ): boolean {
   return (
     subscription.status === "ACTIVE" &&
+    subscription.startDate !== null &&
+    subscription.endDate !== null &&
     subscription.startDate.getTime() <=
       now.getTime() &&
     subscription.endDate.getTime() >=
@@ -492,7 +504,7 @@ export async function updateProduct(
         depthMm:
           existing.depthMm,
         inputUnit:
-          existing.inputUnit,
+          toDimensionUnit(existing.inputUnit),
       }
     );
 

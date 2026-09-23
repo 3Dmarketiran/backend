@@ -10,11 +10,10 @@ import {
   logout,
 } from "../services/authService";
 import {
-  env,
   isProduction,
 } from "../config/env";
 
-const router = Router();
+export const authRouter = Router();
 
 const SESSION_COOKIE_NAME = "session";
 
@@ -156,7 +155,7 @@ const serializeUser = (user: any) => ({
 /**
  * POST /api/auth/login
  */
-router.post(
+authRouter.post(
   "/login",
   loginRateLimiter,
   async (req, res, next) => {
@@ -229,7 +228,7 @@ router.post(
  * - HttpOnly session cookie
  * - Authorization: Bearer <session>
  */
-router.get(
+authRouter.get(
   "/me",
   async (req, res, next) => {
     try {
@@ -277,7 +276,7 @@ router.get(
 /**
  * POST /api/auth/logout
  */
-router.post(
+authRouter.post(
   "/logout",
   async (req, res, next) => {
     try {
@@ -304,4 +303,3 @@ router.post(
   },
 );
 
-export default router;

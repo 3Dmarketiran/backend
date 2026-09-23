@@ -38,13 +38,15 @@ function assertRouteId(
 function isSubscriptionCurrentlyActive(
   subscription: {
     status: string;
-    startDate: Date;
-    endDate: Date;
+    startDate: Date | null;
+    endDate: Date | null;
   },
   now = new Date()
 ): boolean {
   return (
     subscription.status === "ACTIVE" &&
+    subscription.startDate !== null &&
+    subscription.endDate !== null &&
     subscription.startDate <= now &&
     subscription.endDate >= now
   );
