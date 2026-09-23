@@ -72,6 +72,68 @@ function isAdminRole(
 // - subscription has not expired
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// Public seller logo proxy
+//
+// The logo is still stored in the configured S3/Supabase storage.
+// This endpoint intentionally serves the stored object through the API
+// so the static GitHub Pages storefront does not depend on the bucket
+// being publicly readable.
+// ---------------------------------------------------------------------
+
+sellersRouter.get(
+  "/by-slug/:slug/logo",
+  async (req, res, next) => {
+    try {
+      const slug = req.params.slug.trim();
+      if (!slug) {
+        throw new HttpError(400, "شناسه فروشگاه نامعتبر است.");
+      }
+
+      const now = new Date();
+      const seller = await prisma.seller.findUnique({
+        where: { slug },
+        include: {
+          subscriptions: {
+            where: {
+              status: "ACTIVE",
+              startDate: { lte: now },
+              endDate: { gte: now },
+              plan: { is: { isActive: true } },
+            },
+            take: 1,
+          },
+        },
+      });
+
+      if (!seller?.isActive || seller.subscriptions.length === 0 || !seller.logoUrl) {
+        throw new HttpError(404, "لوگوی فروشگاه یافت نشد.");
+      }
+
+      const storageKey = extractStorageKeyFromUrl(seller.logoUrl);
+      if (!storageKey) {
+        throw new HttpError(404, "مسیر ذخیره‌سازی لوگو معتبر نیست.");
+      }
+
+      const buffer = await storage.read(storageKey);
+      const pathname = new URL(seller.logoUrl).pathname.toLowerCase();
+      const contentType = pathname.endsWith(".png")
+        ? "image/png"
+        : pathname.endsWith(".webp")
+          ? "image/webp"
+          : pathname.endsWith(".gif")
+            ? "image/gif"
+            : "image/jpeg";
+
+      res.setHeader("Content-Type", contentType);
+      res.setHeader("Cache-Control", "public, max-age=86400, stale-while-revalidate=604800");
+      res.send(buffer);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 sellersRouter.get(
   "/by-slug/:slug",
   async (req, res, next) => {
@@ -648,7 +710,7 @@ sellersRouter.put(
         },
       });
 
-      void republishForSeller(sellerId, req.user!.id);
+      await republishForSeller(sellerId, req.user!.id);
 
       res.json({
         seller: {
@@ -792,7 +854,7 @@ sellersRouter.post(
       newStorageKey =
         undefined;
 
-      void republishForSeller(seller.id, req.user!.id);
+      await republishForSeller(seller.id, req.user!.id);
 
       res.status(201).json({
         seller: {
