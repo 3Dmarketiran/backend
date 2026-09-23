@@ -706,6 +706,7 @@ export async function addProductModelsFromZip(
             folder: modelFolder,
             filename:
               dependency.filename,
+            storageKey: `${modelFolder}/${dependency.filename.replace(/\\/g, "/")}`,
             buffer:
               dependency.buffer,
             contentType:
@@ -723,6 +724,7 @@ export async function addProductModelsFromZip(
         await storage.save({
           folder: modelFolder,
           filename: pkg.model.filename,
+          storageKey: `${modelFolder}/${pkg.model.filename.replace(/\\/g, "/").split("/").pop()}`,
           buffer: pkg.model.buffer,
           contentType:
             getModelContentType(

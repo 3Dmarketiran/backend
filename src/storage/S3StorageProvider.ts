@@ -84,6 +84,7 @@ export class S3StorageProvider implements StorageProvider {
     filename: string;
     buffer: Buffer;
     contentType: string;
+    storageKey?: string;
   }): Promise<StoredFile> {
     if (!params.buffer || params.buffer.length === 0) {
       throw new Error("Cannot store an empty file.");
@@ -96,7 +97,9 @@ export class S3StorageProvider implements StorageProvider {
     }
 
     const extension = getSafeExtension(params.filename);
-    const key = `${folder}/${nanoid(16)}${extension}`;
+    const key = params.storageKey
+      ? sanitizeStorageKey(params.storageKey)
+      : `${folder}/${nanoid(16)}${extension}`;
 
     await this.client.send(
       new PutObjectCommand({
