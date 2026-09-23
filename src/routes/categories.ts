@@ -4,6 +4,7 @@ import { prisma } from "../config/prisma";
 import { requireAuth } from "../middleware/auth";
 import { requireAdmin } from "../middleware/rbac";
 import { slugify } from "../utils/slug";
+import { republishForAllSellers } from "../services/publishService";
 
 export const categoriesRouter = Router();
 
@@ -140,6 +141,7 @@ categoriesRouter.get("/", async (req, res, next) => {
         _count: {
           select: {
             products: true,
+            sellers: true,
           },
         },
       },
@@ -175,6 +177,7 @@ categoriesRouter.get("/:id", async (req, res, next) => {
         _count: {
           select: {
             products: true,
+            sellers: true,
           },
         },
       },
@@ -226,10 +229,13 @@ categoriesRouter.post(
           _count: {
             select: {
               products: true,
+              sellers: true,
             },
           },
         },
       });
+
+      void republishForAllSellers(req.user!.id);
 
       res.status(201).json({
         category,
@@ -306,10 +312,15 @@ categoriesRouter.put(
           _count: {
             select: {
               products: true,
+              sellers: true,
             },
           },
         },
       });
+
+      void republishForAllSellers(req.user!.id);
+
+      void republishForAllSellers(req.user!.id);
 
       res.json({
         category,
@@ -349,6 +360,7 @@ categoriesRouter.patch(
           _count: {
             select: {
               products: true,
+              sellers: true,
             },
           },
         },
@@ -371,6 +383,7 @@ categoriesRouter.patch(
           _count: {
             select: {
               products: true,
+              sellers: true,
             },
           },
         },
@@ -410,6 +423,7 @@ categoriesRouter.delete(
           _count: {
             select: {
               products: true,
+              sellers: true,
               children: true,
             },
           },
@@ -422,12 +436,16 @@ categoriesRouter.delete(
         });
       }
 
-      if (category._count.products > 0) {
+      if (
+        category._count.products > 0 ||
+        category._count.sellers > 0
+      ) {
         return res.status(409).json({
           message:
-            "This category cannot be deleted because products are assigned to it. Reassign or remove the products from this category first.",
-          code: "CATEGORY_HAS_PRODUCTS",
+            "This category cannot be deleted because it is still in use.",
+          code: "CATEGORY_IN_USE",
           productCount: category._count.products,
+          sellerCount: category._count.sellers,
         });
       }
 
@@ -445,6 +463,8 @@ categoriesRouter.delete(
           id: req.params.id,
         },
       });
+
+      void republishForAllSellers(req.user!.id);
 
       res.status(204).send();
     } catch (err) {

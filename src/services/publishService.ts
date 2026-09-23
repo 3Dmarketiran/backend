@@ -617,6 +617,12 @@ async function getPublicProducts(
           select: {
             slug: true,
             storeName: true,
+            sellerCategory: {
+              select: {
+                slug: true,
+                name: true,
+              },
+            },
           },
         },
 
@@ -715,6 +721,16 @@ async function getPublicProducts(
           storeName:
             product.seller
               .storeName,
+
+          category:
+            product.seller.sellerCategory
+              ? {
+                  slug:
+                    product.seller.sellerCategory.slug,
+                  name:
+                    product.seller.sellerCategory.name,
+                }
+              : null,
         },
 
         images,
@@ -801,6 +817,15 @@ async function getPublicSellers() {
         storeName:
           "asc",
       },
+
+      include: {
+        sellerCategory: {
+          select: {
+            slug: true,
+            name: true,
+          },
+        },
+      },
     });
 
   return sellers.map(
@@ -825,6 +850,14 @@ async function getPublicSellers() {
 
       address:
         seller.address,
+
+      category:
+        seller.sellerCategory
+          ? {
+              slug: seller.sellerCategory.slug,
+              name: seller.sellerCategory.name,
+            }
+          : null,
 
       socialLinks:
         parseJson(
@@ -920,6 +953,28 @@ export async function republishForSeller(
   );
 
   return job;
+}
+
+
+
+/**
+ * Regenerates the public snapshot for every seller.
+ * Used for platform-wide metadata changes such as seller categories.
+ */
+export async function republishForAllSellers(
+  triggeredByUserId: string
+) {
+  const sellers = await prisma.seller.findMany({
+    select: {
+      id: true,
+    },
+  });
+
+  return Promise.all(
+    sellers.map((seller) =>
+      republishForSeller(seller.id, triggeredByUserId)
+    )
+  );
 }
 
 /**

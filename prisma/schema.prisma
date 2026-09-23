@@ -85,6 +85,8 @@ model Seller {
   contactEmail String?
   contactPhone String?
   address      String?
+  sellerCategoryId String?
+  sellerCategory   Category? @relation("SellerCategory", fields: [sellerCategoryId], references: [id], onDelete: SetNull)
   socialLinks  String?   // JSON-serialized object
 
   isActive     Boolean  @default(true) // admin can hard-disable regardless of subscription
@@ -99,6 +101,7 @@ model Seller {
   auditLogs       AuditLog[]       @relation("AuditSeller")
 
   @@index([slug])
+  @@index([sellerCategoryId])
 }
 
 // ----------------------------------------------------------------
@@ -119,6 +122,7 @@ model Category {
   children  Category[] @relation("CategoryTree")
 
   products  Product[]
+  sellers   Seller[]  @relation("SellerCategory")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

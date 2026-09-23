@@ -15,6 +15,7 @@ import {
   serializeJson,
 } from "../utils/json";
 import { storage } from "../storage";
+import { republishForSeller } from "../services/publishService";
 
 export const sellersRouter = Router();
 
@@ -92,6 +93,7 @@ sellersRouter.get(
             slug,
           },
           include: {
+            sellerCategory: true,
             subscriptions: {
               where: {
                 status: "ACTIVE",
@@ -141,6 +143,12 @@ sellersRouter.get(
             seller.contactPhone,
           address:
             seller.address,
+          category: seller.sellerCategory
+            ? {
+                slug: seller.sellerCategory.slug,
+                name: seller.sellerCategory.name,
+              }
+            : null,
           socialLinks: parseJson(
             seller.socialLinks,
             {}
@@ -168,6 +176,7 @@ sellersRouter.get(
       const sellers =
         await prisma.seller.findMany({
           include: {
+            sellerCategory: true,
             user: {
               select: {
                 email: true,
@@ -254,6 +263,7 @@ const createSellerSchema =
       .trim()
       .max(30)
       .optional(),
+    categoryId: z.string().trim().min(1).optional(),
   });
 
 // Admin-only: creates seller accounts.
@@ -309,7 +319,8 @@ sellersRouter.post(
 
       if (
         input.contactEmail ||
-        input.contactPhone
+        input.contactPhone ||
+        input.categoryId
       ) {
         await prisma.seller.update({
           where: {
@@ -328,6 +339,12 @@ sellersRouter.post(
               ? {
                   contactPhone:
                     input.contactPhone,
+                }
+              : {}),
+            ...(input.categoryId
+              ? {
+                  sellerCategoryId:
+                    input.categoryId,
                 }
               : {}),
           },
@@ -428,6 +445,13 @@ const updateSellerSchema =
       .max(300)
       .optional(),
 
+    categoryId: z
+      .string()
+      .trim()
+      .min(1)
+      .nullable()
+      .optional(),
+
     socialLinks: z
       .record(z.string().trim().url())
       .optional(),
@@ -458,6 +482,9 @@ sellersRouter.put(
         await prisma.seller.findUnique({
           where: {
             id: sellerId,
+          },
+          include: {
+            sellerCategory: true,
           },
         });
 
@@ -577,6 +604,14 @@ sellersRouter.put(
                 }
               : {}),
 
+            ...(input.categoryId !==
+            undefined
+              ? {
+                  sellerCategoryId:
+                    input.categoryId,
+                }
+              : {}),
+
             ...(input.socialLinks !==
             undefined
               ? {
@@ -612,6 +647,8 @@ sellersRouter.put(
           ipAddress: req.ip,
         },
       });
+
+      void republishForSeller(sellerId, req.user!.id);
 
       res.json({
         seller: {
@@ -755,6 +792,8 @@ sellersRouter.post(
       newStorageKey =
         undefined;
 
+      void republishForSeller(seller.id, req.user!.id);
+
       res.status(201).json({
         seller: {
           ...updatedSeller,
@@ -806,6 +845,7 @@ sellersRouter.get(
             id: sellerId,
           },
           include: {
+            sellerCategory: true,
             subscriptions: {
               orderBy: {
                 createdAt: "desc",
