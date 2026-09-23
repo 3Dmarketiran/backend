@@ -7,6 +7,13 @@ const GITHUB_UPLOADS_API = "https://uploads.github.com";
 
 const GITHUB_API_VERSION = "2022-11-28";
 const REQUEST_TIMEOUT_MS = 30_000;
+
+// The health-check endpoint calls testConnection() on every poll (including
+// Render's own health checks). It must fail fast instead of waiting up to
+// REQUEST_TIMEOUT_MS, or a slow/rate-limited GitHub API turns a liveness
+// probe into a multi-second (or 30s) stall — which can make Render think
+// the whole service is unresponsive and restart it.
+const HEALTH_CHECK_TIMEOUT_MS = 4_000;
 const MAX_ERROR_BODY_LENGTH = 300;
 
 function assertConfigured(): void {
@@ -71,8 +78,8 @@ function sanitizeAssetBaseName(value: string): string {
   return sanitized || "model";
 }
 
-function createAbortSignal(): AbortSignal {
-  return AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+function createAbortSignal(timeoutMs: number = REQUEST_TIMEOUT_MS): AbortSignal {
+  return AbortSignal.timeout(timeoutMs);
 }
 
 async function getFileSha(pathname: string): Promise<string | null> {
@@ -724,7 +731,7 @@ export async function testConnection(): Promise<{
       `${repositoryBaseUrl()}`,
       {
         headers: authHeaders(),
-        signal: createAbortSignal(),
+        signal: createAbortSignal(HEALTH_CHECK_TIMEOUT_MS),
       }
     );
 

@@ -13,7 +13,7 @@ import pinoHttp from "pino-http";
 import { rateLimit } from "express-rate-limit";
 
 import { env, isProduction } from "./config/env";
-import { prisma } from "./lib/prisma";
+import { prisma } from "./config/prisma";
 import { attachUser } from "./middleware/auth";
 import { apiRateLimiter } from "./middleware/rateLimit";
 
