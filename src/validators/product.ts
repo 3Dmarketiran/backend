@@ -9,8 +9,6 @@ export const dimensionUnitSchema = z.enum([
 export const createProductSchema = z.object({
   name: z.string().min(2).max(200),
 
-  price: z.number().min(0).max(1000000000000).optional(),
-
   shortDescription:
     z.string().max(300).optional(),
 

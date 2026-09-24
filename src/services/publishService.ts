@@ -10,7 +10,6 @@ import {
 import { millimetersToMeters } from "../utils/dimensions";
 import { HttpError } from "../middleware/errorHandler";
 import { logger } from "../utils/logger";
-import { env } from "../config/env";
 import {
   parseJson,
   serializeJson,
@@ -696,9 +695,6 @@ async function getPublicProducts(
         name:
           product.name,
 
-        price:
-          product.price,
-
         shortDescription:
           product.shortDescription,
 
@@ -844,11 +840,7 @@ async function getPublicSellers() {
         seller.description,
 
       logoUrl:
-        seller.logoUrl
-          ? env.API_URL
-            ? `${env.API_URL.replace(/\/+$/, "")}/api/sellers/by-slug/${encodeURIComponent(seller.slug)}/logo`
-            : seller.logoUrl
-          : null,
+        seller.logoUrl,
 
       contactEmail:
         seller.contactEmail,

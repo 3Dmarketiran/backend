@@ -426,9 +426,6 @@ export async function createProduct(
       name:
         input.name,
 
-      price:
-        input.price,
-
       shortDescription:
         input.shortDescription,
 
@@ -521,8 +518,6 @@ export async function updateProduct(
   const hasContentChanges =
     input.name !==
       undefined ||
-    input.price !==
-      undefined ||
     input.shortDescription !==
       undefined ||
     input.fullDescription !==
@@ -564,11 +559,6 @@ export async function updateProduct(
       name:
         input.name ??
         existing.name,
-
-      price:
-        input.price !== undefined
-          ? input.price
-          : existing.price,
 
       shortDescription:
         input.shortDescription !==

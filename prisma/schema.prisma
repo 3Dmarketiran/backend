@@ -138,7 +138,6 @@ model Product {
 
   slug        String            @unique
   name        String
-  price       Float?
   shortDescription String?
   fullDescription  String?
 
