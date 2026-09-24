@@ -403,6 +403,84 @@ sellersRouter.post(
 );
 
 // ---------------------------------------------------------------------
+// Seller: own profile
+// ---------------------------------------------------------------------
+
+sellersRouter.get(
+  "/:id",
+  requireAuth,
+  requireOwnSeller(),
+  async (req, res, next) => {
+    try {
+      const sellerId = assertRouteId(req.params.id, "شناسه فروشنده نامعتبر است.");
+      const seller = await prisma.seller.findUnique({
+        where: { id: sellerId },
+        include: { sellerCategory: true },
+      });
+
+      if (!seller) {
+        throw new HttpError(404, "فروشنده یافت نشد.");
+      }
+
+      res.json({
+        seller: {
+          ...seller,
+          category: seller.sellerCategory,
+          socialLinks: parseJson(seller.socialLinks, {}),
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ---------------------------------------------------------------------
+// Public: seller logo proxy
+// ---------------------------------------------------------------------
+
+sellersRouter.get(
+  "/by-slug/:slug/logo",
+  async (req, res, next) => {
+    try {
+      const slug = req.params.slug.trim();
+      if (!slug) throw new HttpError(400, "شناسه فروشگاه نامعتبر است.");
+
+      const seller = await prisma.seller.findUnique({
+        where: { slug },
+        select: { logoUrl: true, isActive: true },
+      });
+
+      if (!seller?.isActive || !seller.logoUrl) {
+        return res.status(404).end();
+      }
+
+      const storageKey = extractStorageKeyFromUrl(seller.logoUrl);
+      if (!storageKey) {
+        return res.redirect(seller.logoUrl);
+      }
+
+      const buffer = await storage.read(storageKey);
+      const extension = storageKey.split(".").pop()?.toLowerCase();
+      const contentTypes: Record<string, string> = {
+        jpg: "image/jpeg",
+        jpeg: "image/jpeg",
+        png: "image/png",
+        webp: "image/webp",
+        gif: "image/gif",
+        svg: "image/svg+xml",
+      };
+
+      res.setHeader("Content-Type", contentTypes[extension || ""] || "application/octet-stream");
+      res.setHeader("Cache-Control", "public, max-age=300, s-maxage=300");
+      return res.send(buffer);
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ---------------------------------------------------------------------
 // Seller profile update
 // ---------------------------------------------------------------------
 
