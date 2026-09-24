@@ -505,6 +505,12 @@ const updateSellerSchema =
       .url()
       .optional(),
 
+    themeColor: z
+      .string()
+      .trim()
+      .regex(/^#[0-9a-fA-F]{6}$/)
+      .optional(),
+
     contactEmail: z
       .string()
       .trim()

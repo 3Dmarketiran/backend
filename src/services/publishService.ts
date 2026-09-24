@@ -701,6 +701,9 @@ async function getPublicProducts(
         fullDescription:
           product.fullDescription,
 
+        price:
+          product.price,
+
         tags:
           product.tags
             ?.split(",")
@@ -841,6 +844,9 @@ async function getPublicSellers() {
 
       logoUrl:
         seller.logoUrl,
+
+      themeColor:
+        seller.themeColor,
 
       contactEmail:
         seller.contactEmail,

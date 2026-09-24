@@ -15,6 +15,9 @@ export const createProductSchema = z.object({
   fullDescription:
     z.string().max(10_000).optional(),
 
+  price:
+    z.number().min(0).max(1_000_000_000_000).optional(),
+
   categoryId:
     z.string().cuid().optional(),
 

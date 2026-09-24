@@ -432,6 +432,9 @@ export async function createProduct(
       fullDescription:
         input.fullDescription,
 
+      price:
+        input.price,
+
       categoryId:
         input.categoryId,
 
@@ -522,6 +525,8 @@ export async function updateProduct(
       undefined ||
     input.fullDescription !==
       undefined ||
+    input.price !==
+      undefined ||
     input.categoryId !==
       undefined ||
     input.tags !==
@@ -571,6 +576,12 @@ export async function updateProduct(
         undefined
           ? input.fullDescription
           : existing.fullDescription,
+
+      price:
+        input.price !==
+        undefined
+          ? input.price
+          : existing.price,
 
       categoryId:
         input.categoryId !==

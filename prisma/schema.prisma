@@ -82,6 +82,7 @@ model Seller {
   storeName    String
   description  String?
   logoUrl      String?
+  themeColor   String?
   contactEmail String?
   contactPhone String?
   address      String?
@@ -140,6 +141,7 @@ model Product {
   name        String
   shortDescription String?
   fullDescription  String?
+  price         Float?
 
   categoryId  String?
   category    Category?         @relation(fields: [categoryId], references: [id])
