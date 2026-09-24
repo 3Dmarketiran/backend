@@ -106,7 +106,7 @@ sellersRouter.get(
         },
       });
 
-      if (!seller?.isActive || seller.subscriptions.length === 0 || !seller.logoUrl) {
+      if (!seller?.isActive || !seller.logoUrl) {
         throw new HttpError(404, "لوگوی فروشگاه یافت نشد.");
       }
 
