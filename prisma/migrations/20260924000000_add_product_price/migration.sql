@@ -1,1 +1,2 @@
 ALTER TABLE "Product" ADD COLUMN "price" DOUBLE PRECISION;
+ALTER TABLE "Seller" ADD COLUMN "themeColor" TEXT;
