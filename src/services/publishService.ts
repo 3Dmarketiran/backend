@@ -696,6 +696,9 @@ async function getPublicProducts(
         name:
           product.name,
 
+        price:
+          product.price,
+
         shortDescription:
           product.shortDescription,
 
