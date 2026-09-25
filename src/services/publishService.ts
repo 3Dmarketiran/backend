@@ -226,6 +226,7 @@ async function processPublishJob(
       sellers,
       categories,
       settings,
+      plans,
     ] = await Promise.all([
       getPublicProducts(jobId),
 
@@ -237,6 +238,11 @@ async function processPublishJob(
         where: {
           id: "singleton",
         },
+      }),
+
+      prisma.subscriptionPlan.findMany({
+        where: { isActive: true },
+        orderBy: { durationDays: "asc" },
       }),
     ]);
 
@@ -300,9 +306,45 @@ async function processPublishJob(
         `chore(publish): update settings.json [job ${jobId}]`
       );
 
+    lastCommitSha = await upsertFile(
+      `${PUBLIC_DATA_DIR}/plans.json`,
+      JSON.stringify(plans.map((plan) => ({
+        id: plan.id,
+        name: plan.name,
+        durationDays: plan.durationDays,
+        price: plan.price,
+        discountPct: plan.discountPct,
+        productLimit: plan.productLimit,
+        storageLimitMb: plan.storageLimitMb,
+        features: parseJson(plan.features, {}),
+      })), null, 2),
+      `chore(publish): update plans.json [job ${jobId}]`
+    );
+
+    // catalog.json is the public storefront's single source of truth.
+    // It is intentionally written LAST: until this pointer is updated,
+    // visitors continue seeing the previous complete snapshot.
+    const catalogPayload = {
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      version: createCatalogVersion({ products, sellers, categories, settings: settings ?? {}, plans }),
+      products,
+      sellers,
+      categories,
+      settings: settings ?? {},
+      plans: plans.map((plan) => ({ id: plan.id, name: plan.name, durationDays: plan.durationDays, price: plan.price, discountPct: plan.discountPct, productLimit: plan.productLimit, storageLimitMb: plan.storageLimitMb, features: parseJson(plan.features, {}) })),
+    };
+
+    lastCommitSha =
+      await upsertFile(
+        `${PUBLIC_DATA_DIR}/catalog.json`,
+        JSON.stringify(catalogPayload, null, 2),
+        `chore(publish): update atomic public catalog [job ${jobId}]`
+      );
+
     await log(
       jobId,
-      `انتشار در GitHub موفق بود. آخرین commit: ${lastCommitSha}`
+      `انتشار در GitHub موفق بود. کاتالوگ عمومی به‌صورت atomic به‌روزرسانی شد. آخرین commit: ${lastCommitSha}`
     );
 
     const completedJob =
@@ -481,6 +523,17 @@ async function processPublishJob(
   }
 }
 
+function createCatalogVersion(payload: unknown): string {
+  // Stable enough to invalidate the frontend build/cache when catalog data changes.
+  const json = JSON.stringify(payload);
+  let hash = 2166136261;
+  for (let i = 0; i < json.length; i += 1) {
+    hash ^= json.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
 /* -------------------------------------------------------------------------- */
 /* Public catalog generation                                                  */
 /* -------------------------------------------------------------------------- */
@@ -615,6 +668,7 @@ async function getPublicProducts(
 
         seller: {
           select: {
+            id: true,
             slug: true,
             storeName: true,
             sellerCategory: {
@@ -742,6 +796,7 @@ async function getPublicProducts(
         category,
 
         seller: {
+          id: product.seller.id,
           slug:
             product.seller
               .slug,
@@ -858,6 +913,7 @@ async function getPublicSellers() {
 
   return sellers.map(
     (seller) => ({
+      id: seller.id,
       slug:
         seller.slug,
 

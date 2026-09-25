@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/index.js",
+    "start": "prisma migrate deploy && node dist/index.js",
     "prisma:generate": "prisma generate",
     "migrate": "prisma migrate dev --name init",
     "migrate:deploy": "prisma migrate deploy",
