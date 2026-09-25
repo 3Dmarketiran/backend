@@ -26,6 +26,7 @@ import { categoriesRouter } from "./routes/categories";
 import { analyticsRouter } from "./routes/analytics";
 import { adminSettingsRouter } from "./routes/adminSettings";
 import { publishingRouter, mountPublishingOnProducts } from "./routes/publishing";
+import { publicCatalogRouter } from "./routes/publicCatalog";
 
 import { expireOverdueSubscriptions } from "./routes/subscriptions";
 
@@ -53,7 +54,7 @@ const allowedOrigins = env.CORS_ORIGIN
 function isAllowedOrigin(origin?: string) {
   if (!origin) return true;
 
-  return allowedOrigins.includes(origin);
+  return allowedOrigins.includes(origin) || /^https:\/\/3dmarketiran\.github\.io$/.test(origin);
 }
 
 app.use(
@@ -212,6 +213,7 @@ if (env.STORAGE_PROVIDER === "local") {
 /* -------------------------------------------------------------------------- */
 
 app.use("/api/health", healthRouter);
+app.use("/api/public", publicCatalogRouter);
 
 /* -------------------------------------------------------------------------- */
 /* API routes                                                                 */
