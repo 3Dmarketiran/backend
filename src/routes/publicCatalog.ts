@@ -72,7 +72,7 @@ publicCatalogRouter.get("/catalog", async (_req, res, next) => {
       }),
       prisma.category.findMany({
         where: { isActive: true },
-        select: { id: true, slug: true, name: true, description: true, isActive: true },
+        select: { id: true, slug: true, name: true, isActive: true },
         orderBy: { name: "asc" },
       }),
       prisma.platformSetting.findUnique({ where: { id: "singleton" } }),
