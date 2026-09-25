@@ -1,1 +1,1 @@
-ALTER TABLE "Seller" ADD COLUMN "themeColor" TEXT;
+ALTER TABLE "Seller" ADD COLUMN IF NOT EXISTS "themeColor" TEXT;
