@@ -46,18 +46,12 @@ analyticsRouter.post("/track", async (req, res, next) => {
 analyticsRouter.get("/admin/overview", requireAuth, requireAdmin, async (_req, res, next) => {
   try {
     const [sellerCounts, productCounts, eventCounts] = await Promise.all([
-      prisma.seller.groupBy({ by: ["isActive"], _count: { _all: true } }),
-      prisma.product.groupBy({ by: ["visibility"], _count: { _all: true } }),
-      prisma.analyticsEvent.groupBy({ by: ["type"], _count: { _all: true } }),
+      prisma.seller.groupBy({ by: ["isActive"], _count: true }),
+      prisma.product.groupBy({ by: ["visibility"], _count: true }),
+      prisma.analyticsEvent.groupBy({ by: ["type"], _count: true }),
     ]);
 
-    // Flatten Prisma's `_count: { _all: number }` groupBy shape into a plain
-    // `_count: number` so it matches what the admin dashboard expects.
-    res.json({
-      sellerCounts: sellerCounts.map((row) => ({ isActive: row.isActive, _count: row._count._all })),
-      productCounts: productCounts.map((row) => ({ visibility: row.visibility, _count: row._count._all })),
-      eventCounts: eventCounts.map((row) => ({ type: row.type, _count: row._count._all })),
-    });
+    res.json({ sellerCounts, productCounts, eventCounts });
   } catch (err) {
     next(err);
   }
@@ -73,13 +67,9 @@ analyticsRouter.get(
       const eventCounts = await prisma.analyticsEvent.groupBy({
         by: ["type"],
         where: { sellerId: req.params.sellerId },
-        _count: { _all: true },
+        _count: true,
       });
-      // Flatten `_count: { _all: number }` into `_count: number` for the
-      // seller analytics panel (see the admin/overview handler above).
-      res.json({
-        eventCounts: eventCounts.map((row) => ({ type: row.type, _count: row._count._all })),
-      });
+      res.json({ eventCounts });
     } catch (err) {
       next(err);
     }
