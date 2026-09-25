@@ -5,31 +5,96 @@ import { HttpError } from "../middleware/errorHandler";
 const GITHUB_API = "https://api.github.com";
 const GITHUB_UPLOADS_API = "https://uploads.github.com";
 
-function assertConfigured() {
-  if (!env.GITHUB_TOKEN || !env.GITHUB_OWNER || !env.GITHUB_REPOSITORY) {
+const GITHUB_API_VERSION = "2022-11-28";
+const REQUEST_TIMEOUT_MS = 30_000;
+
+// The health-check endpoint calls testConnection() on every poll (including
+// Render's own health checks). It must fail fast instead of waiting up to
+// REQUEST_TIMEOUT_MS, or a slow/rate-limited GitHub API turns a liveness
+// probe into a multi-second (or 30s) stall — which can make Render think
+// the whole service is unresponsive and restart it.
+const HEALTH_CHECK_TIMEOUT_MS = 4_000;
+const MAX_ERROR_BODY_LENGTH = 300;
+
+function assertConfigured(): void {
+  if (
+    !env.GITHUB_TOKEN ||
+    !env.GITHUB_OWNER ||
+    !env.GITHUB_REPOSITORY
+  ) {
     throw new HttpError(
       503,
-      "انتشار در GitHub پیکربندی نشده است. مدیر باید GITHUB_TOKEN/GITHUB_OWNER/GITHUB_REPOSITORY را تنظیم کند."
+      "انتشار در GitHub پیکربندی نشده است. مدیر باید تنظیمات GitHub را تکمیل کند."
     );
   }
 }
 
-function authHeaders() {
+function authHeaders(): Record<string, string> {
   return {
     Authorization: `Bearer ${env.GITHUB_TOKEN}`,
     Accept: "application/vnd.github+json",
-    "X-GitHub-Api-Version": "2022-11-28",
+    "X-GitHub-Api-Version": GITHUB_API_VERSION,
   };
 }
 
-async function getFileSha(path: string): Promise<string | null> {
+function repositoryBaseUrl(): string {
+  assertConfigured();
+
+  return (
+    `${GITHUB_API}/repos/` +
+    `${encodeURIComponent(env.GITHUB_OWNER!)}/` +
+    `${encodeURIComponent(env.GITHUB_REPOSITORY!)}`
+  );
+}
+
+function encodePath(pathname: string): string {
+  return pathname
+    .replace(/\\/g, "/")
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+}
+
+function repositoryContentsUrl(pathname: string): string {
+  return `${repositoryBaseUrl()}/contents/${encodePath(pathname)}`;
+}
+
+function truncateErrorBody(body: string): string {
+  return body
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_ERROR_BODY_LENGTH);
+}
+
+function sanitizeAssetBaseName(value: string): string {
+  const sanitized = value
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^\.+/, "")
+    .slice(0, 80);
+
+  return sanitized || "model";
+}
+
+function createAbortSignal(timeoutMs: number = REQUEST_TIMEOUT_MS): AbortSignal {
+  return AbortSignal.timeout(timeoutMs);
+}
+
+async function getFileSha(pathname: string): Promise<string | null> {
   const url =
-    `${GITHUB_API}/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPOSITORY}` +
-    `/contents/${encodeURI(path)}?ref=${env.GITHUB_BRANCH}`;
+    `${repositoryContentsUrl(pathname)}` +
+    `?ref=${encodeURIComponent(env.GITHUB_BRANCH)}`;
 
-  const res = await fetch(url, { headers: authHeaders() });
+  const res = await fetch(url, {
+    headers: authHeaders(),
+    signal: createAbortSignal(),
+  });
 
-  if (res.status === 404) return null;
+  if (res.status === 404) {
+    return null;
+  }
 
   if (!res.ok) {
     throw new HttpError(
@@ -38,12 +103,25 @@ async function getFileSha(path: string): Promise<string | null> {
     );
   }
 
-  const data = (await res.json()) as { sha: string };
+  const data = (await res.json()) as {
+    sha?: string;
+  };
+
+  if (!data.sha) {
+    throw new HttpError(
+      502,
+      "GitHub پاسخ معتبر برای SHA فایل برنگرداند."
+    );
+  }
+
   return data.sha;
 }
 
 function gitBlobSha(content: Buffer): string {
-  const header = Buffer.from(`blob ${content.byteLength}\0`, "utf8");
+  const header = Buffer.from(
+    `blob ${content.byteLength}\0`,
+    "utf8"
+  );
 
   return createHash("sha1")
     .update(Buffer.concat([header, content]))
@@ -51,11 +129,33 @@ function gitBlobSha(content: Buffer): string {
 }
 
 function contentSha256(content: Buffer): string {
-  return createHash("sha256").update(content).digest("hex");
+  return createHash("sha256")
+    .update(content)
+    .digest("hex");
+}
+
+async function readGitHubError(
+  response: Response
+): Promise<string> {
+  try {
+    const body = await response.text();
+
+    if (!body) {
+      return "";
+    }
+
+    return truncateErrorBody(body);
+  } catch {
+    return "";
+  }
 }
 
 /**
- * Creates or updates a UTF-8 text file.
+ * Creates or updates a UTF-8 text file in the configured repository.
+ *
+ * GitHub is used here only as the public metadata/static-data publishing
+ * layer. Product binaries should remain in the configured asset storage
+ * or dedicated Release assets.
  */
 export async function upsertFile(
   path: string,
@@ -64,11 +164,51 @@ export async function upsertFile(
 ): Promise<string> {
   assertConfigured();
 
-  const sha = await getFileSha(path);
+  const contentBuffer = Buffer.from(content, "utf8");
+  const existingSha = await getFileSha(path);
 
-  const url =
-    `${GITHUB_API}/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPOSITORY}` +
-    `/contents/${encodeURI(path)}`;
+  /*
+   * GitHub's Contents API returns the blob SHA for the current file.
+   * Avoid creating an unnecessary commit when the exact content is
+   * already present.
+   */
+  if (existingSha && existingSha === gitBlobSha(contentBuffer)) {
+    /*
+     * The Contents API does not provide the repository HEAD commit here.
+     * Fetch the repository branch metadata so callers still receive a
+     * useful commit reference.
+     */
+    const branchUrl =
+      `${repositoryBaseUrl()}/commits/` +
+      encodeURIComponent(env.GITHUB_BRANCH);
+
+    const branchResponse = await fetch(branchUrl, {
+      headers: authHeaders(),
+      signal: createAbortSignal(),
+    });
+
+    if (!branchResponse.ok) {
+      throw new HttpError(
+        502,
+        `خطا در دریافت آخرین commit از GitHub (${branchResponse.status}).`
+      );
+    }
+
+    const branchData = (await branchResponse.json()) as {
+      sha?: string;
+    };
+
+    if (!branchData.sha) {
+      throw new HttpError(
+        502,
+        "GitHub پاسخ معتبر برای آخرین commit برنگرداند."
+      );
+    }
+
+    return branchData.sha;
+  }
+
+  const url = repositoryContentsUrl(path);
 
   const res = await fetch(url, {
     method: "PUT",
@@ -76,56 +216,76 @@ export async function upsertFile(
       ...authHeaders(),
       "Content-Type": "application/json",
     },
+    signal: createAbortSignal(),
     body: JSON.stringify({
       message: commitMessage,
-      content: Buffer.from(content, "utf-8").toString("base64"),
+      content: contentBuffer.toString("base64"),
       branch: env.GITHUB_BRANCH,
-      ...(sha ? { sha } : {}),
+      ...(existingSha
+        ? {
+            sha: existingSha,
+          }
+        : {}),
     }),
   });
 
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
+    const errorBody = await readGitHubError(res);
 
     throw new HttpError(
       502,
-      `انتشار روی GitHub ناموفق بود (${res.status}): ${body.slice(0, 300)}`
+      `انتشار روی GitHub ناموفق بود (${res.status}).${
+        errorBody ? ` جزئیات: ${errorBody}` : ""
+      }`
     );
   }
 
   const data = (await res.json()) as {
-    commit: { sha: string };
+    commit?: {
+      sha?: string;
+    };
   };
 
-  return data.commit.sha;
+  const commitSha = data.commit?.sha;
+
+  if (!commitSha) {
+    throw new HttpError(
+      502,
+      "GitHub پاسخ معتبر برای commit برنگرداند."
+    );
+  }
+
+  return commitSha;
 }
 
 /**
  * Legacy binary repository upload.
  *
  * Kept for compatibility with existing code.
- * New 3D publishing must use GitHub Releases instead.
+ * New 3D publishing should use GitHub Release assets or external storage,
+ * not repository contents.
  */
 export async function upsertBinaryFile(
   path: string,
   content: Buffer,
   commitMessage: string
-): Promise<{ commitSha: string | null; changed: boolean }> {
+): Promise<{
+  commitSha: string | null;
+  changed: boolean;
+}> {
   assertConfigured();
 
-  const sha = await getFileSha(path);
+  const existingSha = await getFileSha(path);
   const contentSha = gitBlobSha(content);
 
-  if (sha && sha === contentSha) {
+  if (existingSha && existingSha === contentSha) {
     return {
       commitSha: null,
       changed: false,
     };
   }
 
-  const url =
-    `${GITHUB_API}/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPOSITORY}` +
-    `/contents/${encodeURI(path)}`;
+  const url = repositoryContentsUrl(path);
 
   const res = await fetch(url, {
     method: "PUT",
@@ -133,29 +293,47 @@ export async function upsertBinaryFile(
       ...authHeaders(),
       "Content-Type": "application/json",
     },
+    signal: createAbortSignal(),
     body: JSON.stringify({
       message: commitMessage,
       content: content.toString("base64"),
       branch: env.GITHUB_BRANCH,
-      ...(sha ? { sha } : {}),
+      ...(existingSha
+        ? {
+            sha: existingSha,
+          }
+        : {}),
     }),
   });
 
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
+    const errorBody = await readGitHubError(res);
 
     throw new HttpError(
       502,
-      `انتشار فایل باینری روی GitHub ناموفق بود (${res.status}): ${body.slice(0, 300)}`
+      `انتشار فایل باینری روی GitHub ناموفق بود (${res.status}).${
+        errorBody ? ` جزئیات: ${errorBody}` : ""
+      }`
     );
   }
 
   const data = (await res.json()) as {
-    commit: { sha: string };
+    commit?: {
+      sha?: string;
+    };
   };
 
+  const commitSha = data.commit?.sha;
+
+  if (!commitSha) {
+    throw new HttpError(
+      502,
+      "GitHub پاسخ معتبر برای commit باینری برنگرداند."
+    );
+  }
+
   return {
-    commitSha: data.commit.sha,
+    commitSha,
     changed: true,
   };
 }
@@ -187,11 +365,12 @@ async function getReleaseByTag(
   assertConfigured();
 
   const url =
-    `${GITHUB_API}/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPOSITORY}` +
-    `/releases/tags/${encodeURIComponent(tag)}`;
+    `${repositoryBaseUrl()}/releases/tags/` +
+    encodeURIComponent(tag);
 
   const res = await fetch(url, {
     headers: authHeaders(),
+    signal: createAbortSignal(),
   });
 
   if (res.status === 404) {
@@ -199,11 +378,9 @@ async function getReleaseByTag(
   }
 
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
-
     throw new HttpError(
       502,
-      `خطا در دریافت Release از GitHub (${res.status}): ${body.slice(0, 300)}`
+      `خطا در دریافت Release از GitHub (${res.status}).`
     );
   }
 
@@ -225,9 +402,7 @@ export async function getOrCreateRelease(
     return existing;
   }
 
-  const url =
-    `${GITHUB_API}/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPOSITORY}` +
-    `/releases`;
+  const url = `${repositoryBaseUrl()}/releases`;
 
   const res = await fetch(url, {
     method: "POST",
@@ -235,6 +410,7 @@ export async function getOrCreateRelease(
       ...authHeaders(),
       "Content-Type": "application/json",
     },
+    signal: createAbortSignal(),
     body: JSON.stringify({
       tag_name: tag,
       name,
@@ -244,8 +420,12 @@ export async function getOrCreateRelease(
     }),
   });
 
+  /*
+   * Two publish workers should not normally race because the publish
+   * queue is sequential, but this also protects against future
+   * multi-instance implementations.
+   */
   if (res.status === 422) {
-    // Race condition: another publish may have created it.
     const raceWinner = await getReleaseByTag(tag);
 
     if (raceWinner) {
@@ -254,11 +434,13 @@ export async function getOrCreateRelease(
   }
 
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
+    const errorBody = await readGitHubError(res);
 
     throw new HttpError(
       502,
-      `ساخت GitHub Release ناموفق بود (${res.status}): ${body.slice(0, 300)}`
+      `ساخت GitHub Release ناموفق بود (${res.status}).${
+        errorBody ? ` جزئیات: ${errorBody}` : ""
+      }`
     );
   }
 
@@ -266,7 +448,7 @@ export async function getOrCreateRelease(
 }
 
 /**
- * Lists assets belonging to a release.
+ * Lists all assets belonging to a release.
  */
 async function listReleaseAssets(
   releaseId: number
@@ -278,19 +460,18 @@ async function listReleaseAssets(
 
   while (true) {
     const url =
-      `${GITHUB_API}/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPOSITORY}` +
-      `/releases/${releaseId}/assets?per_page=100&page=${page}`;
+      `${repositoryBaseUrl()}/releases/${releaseId}/assets` +
+      `?per_page=100&page=${page}`;
 
     const res = await fetch(url, {
       headers: authHeaders(),
+      signal: createAbortSignal(),
     });
 
     if (!res.ok) {
-      const body = await res.text().catch(() => "");
-
       throw new HttpError(
         502,
-        `خطا در دریافت Assetهای Release (${res.status}): ${body.slice(0, 300)}`
+        `خطا در دریافت Assetهای Release (${res.status}).`
       );
     }
 
@@ -311,8 +492,8 @@ async function listReleaseAssets(
 /**
  * Uploads a binary asset to a GitHub Release.
  *
- * The asset name contains the SHA-256 of its content, so identical
- * content is uploaded only once.
+ * Content is identified by SHA-256 so identical binaries are uploaded
+ * only once per release.
  */
 export async function uploadReleaseAsset(params: {
   releaseId: number;
@@ -326,20 +507,27 @@ export async function uploadReleaseAsset(params: {
 }> {
   assertConfigured();
 
-  const {
-    releaseId,
-    content,
-    extension,
-    baseName = "model",
-  } = params;
+  if (!params.content || params.content.length === 0) {
+    throw new HttpError(
+      400,
+      "فایل 3D خالی است."
+    );
+  }
 
-  const hash = contentSha256(content).slice(0, 32);
+  const hash = contentSha256(params.content).slice(0, 32);
 
-  const assetName = `${baseName}-${hash}.${extension}`;
+  const safeBaseName = sanitizeAssetBaseName(
+    params.baseName ?? "model"
+  );
 
-  const assets = await listReleaseAssets(releaseId);
+  const assetName =
+    `${safeBaseName}-${hash}.${params.extension}`;
 
-  const existing = assets.find((asset) => asset.name === assetName);
+  const assets = await listReleaseAssets(params.releaseId);
+
+  const existing = assets.find(
+    (asset) => asset.name === assetName
+  );
 
   if (existing) {
     return {
@@ -352,13 +540,16 @@ export async function uploadReleaseAsset(params: {
   const encodedName = encodeURIComponent(assetName);
 
   const url =
-    `${GITHUB_UPLOADS_API}/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPOSITORY}` +
-    `/releases/${releaseId}/assets?name=${encodedName}`;
+    `${GITHUB_UPLOADS_API}/repos/` +
+    `${encodeURIComponent(env.GITHUB_OWNER!)}/` +
+    `${encodeURIComponent(env.GITHUB_REPOSITORY!)}` +
+    `/releases/${params.releaseId}/assets` +
+    `?name=${encodedName}`;
 
   const contentType =
-    extension === "usdz"
+    params.extension === "usdz"
       ? "model/vnd.usdz+zip"
-      : extension === "gltf"
+      : params.extension === "gltf"
         ? "model/gltf+json"
         : "model/gltf-binary";
 
@@ -367,21 +558,53 @@ export async function uploadReleaseAsset(params: {
     headers: {
       ...authHeaders(),
       "Content-Type": contentType,
-      "Content-Length": String(content.byteLength),
+      "Content-Length": String(params.content.byteLength),
     },
-    body: content,
+    signal: createAbortSignal(),
+    body: params.content,
   });
 
+  /*
+   * Another process may have uploaded the same hashed asset between
+   * our list request and this upload request.
+   *
+   * Re-check the release before reporting a hard failure.
+   */
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
+    const errorBody = await readGitHubError(res);
+
+    const latestAssets = await listReleaseAssets(
+      params.releaseId
+    );
+
+    const raceWinner = latestAssets.find(
+      (asset) => asset.name === assetName
+    );
+
+    if (raceWinner) {
+      return {
+        url: raceWinner.browser_download_url,
+        assetName,
+        changed: false,
+      };
+    }
 
     throw new HttpError(
       502,
-      `آپلود Asset به GitHub Release ناموفق بود (${res.status}): ${body.slice(0, 500)}`
+      `آپلود Asset به GitHub Release ناموفق بود (${res.status}).${
+        errorBody ? ` جزئیات: ${errorBody}` : ""
+      }`
     );
   }
 
   const asset = (await res.json()) as GitHubReleaseAsset;
+
+  if (!asset.browser_download_url) {
+    throw new HttpError(
+      502,
+      "GitHub URL معتبر برای Asset برنگرداند."
+    );
+  }
 
   return {
     url: asset.browser_download_url,
@@ -393,7 +616,8 @@ export async function uploadReleaseAsset(params: {
 /**
  * Publishes one 3D model into a product-specific GitHub Release.
  *
- * A product keeps one release and each unique binary gets one hashed asset.
+ * A product has one Release and each unique binary is stored once using
+ * a content hash.
  */
 export async function publishReleaseAsset(params: {
   productId: string;
@@ -441,11 +665,11 @@ export async function deleteFile(
 
   const sha = await getFileSha(path);
 
-  if (!sha) return null;
+  if (!sha) {
+    return null;
+  }
 
-  const url =
-    `${GITHUB_API}/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPOSITORY}` +
-    `/contents/${encodeURI(path)}`;
+  const url = repositoryContentsUrl(path);
 
   const res = await fetch(url, {
     method: "DELETE",
@@ -453,6 +677,7 @@ export async function deleteFile(
       ...authHeaders(),
       "Content-Type": "application/json",
     },
+    signal: createAbortSignal(),
     body: JSON.stringify({
       message: commitMessage,
       sha,
@@ -461,21 +686,31 @@ export async function deleteFile(
   });
 
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
+    const errorBody = await readGitHubError(res);
 
     throw new HttpError(
       502,
-      `حذف فایل از GitHub ناموفق بود (${res.status}): ${body.slice(0, 300)}`
+      `حذف فایل از GitHub ناموفق بود (${res.status}).${
+        errorBody ? ` جزئیات: ${errorBody}` : ""
+      }`
     );
   }
 
   const data = (await res.json()) as {
-    commit: { sha: string };
+    commit?: {
+      sha?: string;
+    };
   };
 
-  return data.commit.sha;
+  return data.commit?.sha ?? null;
 }
 
+/**
+ * Lightweight GitHub connectivity check.
+ *
+ * This intentionally does not expose repository credentials or raw
+ * GitHub response bodies.
+ */
 export async function testConnection(): Promise<{
   ok: boolean;
   message: string;
@@ -493,9 +728,10 @@ export async function testConnection(): Promise<{
 
   try {
     const res = await fetch(
-      `${GITHUB_API}/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPOSITORY}`,
+      `${repositoryBaseUrl()}`,
       {
         headers: authHeaders(),
+        signal: createAbortSignal(HEALTH_CHECK_TIMEOUT_MS),
       }
     );
 
@@ -510,12 +746,13 @@ export async function testConnection(): Promise<{
       ok: true,
       message: "اتصال به GitHub برقرار است.",
     };
-  } catch (err) {
+  } catch (error) {
     return {
       ok: false,
-      message: err instanceof Error
-        ? err.message
-        : "خطای نامشخص",
+      message:
+        error instanceof Error
+          ? error.message
+          : "خطای نامشخص در اتصال به GitHub.",
     };
   }
 }

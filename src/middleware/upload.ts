@@ -1,78 +1,346 @@
 import multer from "multer";
+import type { NextFunction, Request, Response } from "express";
 import { fromBuffer } from "file-type";
 import { HttpError } from "../middleware/errorHandler";
 
-// Multer buffers files in memory (not disk) so the StorageProvider is the
-// only thing that ever writes to a persistent location — no orphaned temp
-// files, and it works identically for local and S3 providers.
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10MB
-const MAX_MODEL_BYTES = 100 * 1024 * 1024; // 100MB (GLB/USDZ can be large)
+const MAX_MODEL_BYTES = 100 * 1024 * 1024; // 100MB
+const MAX_ZIP_BYTES = 150 * 1024 * 1024; // 150MB
+const MAX_LOGO_BYTES = 5 * 1024 * 1024; // 5MB
+
+const ALLOWED_IMAGE_MIME = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+]);
+
+const ALLOWED_MODEL_EXTENSIONS = new Set([
+  "glb",
+  "gltf",
+  "usdz",
+]);
+
+// ---------------------------------------------------------------------
+// Multer upload handlers
+// ---------------------------------------------------------------------
 
 export const uploadImage = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: MAX_IMAGE_BYTES },
+  limits: {
+    fileSize: MAX_IMAGE_BYTES,
+  },
 }).single("image");
 
 export const uploadModel = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: MAX_MODEL_BYTES },
+  limits: {
+    fileSize: MAX_MODEL_BYTES,
+  },
 }).single("model");
 
-const ALLOWED_IMAGE_MIME = new Set(["image/jpeg", "image/png", "image/webp"]);
-// GLB has a reliable magic number (glTF binary header "glTF"); GLTF is JSON
-// text (no binary signature) so we fall back to extension + content
-// inspection for it. USDZ is a ZIP container.
-const ALLOWED_MODEL_EXTENSIONS = new Set(["glb", "gltf", "usdz"]);
+export const uploadModelZip = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: MAX_ZIP_BYTES,
+  },
+}).single("modelZip");
 
-/**
- * Validates an uploaded image by inspecting its actual file signature
- * (magic bytes), NOT the filename extension or the client-supplied
- * Content-Type header — both of which are trivially spoofable.
- */
-export async function assertValidImage(buffer: Buffer): Promise<void> {
+// Logo upload middleware.
+//
+// This is intentionally wrapped instead of exporting multer().single()
+// directly so Multer errors and the actual image validation are handled
+// before the request reaches the seller route.
+const logoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: MAX_LOGO_BYTES,
+  },
+}).single("logo");
+
+export const uploadLogo = (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): void => {
+  logoUpload(req, res, async (err: unknown) => {
+    if (err) {
+      if (
+        err instanceof multer.MulterError &&
+        err.code === "LIMIT_FILE_SIZE"
+      ) {
+        return next(
+          new HttpError(
+            413,
+            "حجم لوگو نباید بیشتر از ۵ مگابایت باشد."
+          )
+        );
+      }
+
+      if (err instanceof multer.MulterError) {
+        return next(
+          new HttpError(
+            400,
+            "آپلود لوگو نامعتبر است."
+          )
+        );
+      }
+
+      return next(err);
+    }
+
+    if (!req.file) {
+      return next(
+        new HttpError(
+          400,
+          "فایل لوگو ارسال نشده است."
+        )
+      );
+    }
+
+    try {
+      await assertValidLogo(req.file.buffer);
+      next();
+    } catch (validationError) {
+      next(validationError);
+    }
+  });
+};
+
+// ---------------------------------------------------------------------
+// Image validation
+// ---------------------------------------------------------------------
+
+export async function assertValidImage(
+  buffer: Buffer
+): Promise<void> {
+  if (!buffer || buffer.length === 0) {
+    throw new HttpError(
+      400,
+      "فایل تصویر خالی است."
+    );
+  }
+
   const type = await fromBuffer(buffer);
-  if (!type || !ALLOWED_IMAGE_MIME.has(type.mime)) {
-    throw new HttpError(400, "فرمت تصویر مجاز نیست. فقط JPG، PNG و WEBP پذیرفته می‌شود.");
+
+  if (
+    !type ||
+    !ALLOWED_IMAGE_MIME.has(type.mime)
+  ) {
+    throw new HttpError(
+      400,
+      "فرمت تصویر مجاز نیست. فقط JPG، PNG و WEBP پذیرفته می‌شود."
+    );
   }
 }
 
-/**
- * Validates an uploaded 3D/AR model file. GLB has a binary magic number we
- * check directly; GLTF/USDZ are validated by structural sniffing since they
- * don't have a single universal magic-byte signature recognized by
- * file-type for our purposes.
- */
-export async function assertValidModel(buffer: Buffer, originalFilename: string): Promise<string> {
-  const ext = (originalFilename.split(".").pop() ?? "").toLowerCase();
-  if (!ALLOWED_MODEL_EXTENSIONS.has(ext)) {
-    throw new HttpError(400, "فرمت فایل سه‌بعدی مجاز نیست. فقط GLB، GLTF و USDZ پذیرفته می‌شود.");
+// ---------------------------------------------------------------------
+// Logo validation
+// ---------------------------------------------------------------------
+
+export async function assertValidLogo(
+  buffer: Buffer
+): Promise<void> {
+  await assertValidImage(buffer);
+}
+
+// ---------------------------------------------------------------------
+// 3D / AR model validation
+// ---------------------------------------------------------------------
+
+export async function assertValidModel(
+  buffer: Buffer,
+  originalFilename: string
+): Promise<string> {
+  const ext = (
+    originalFilename
+      .split(".")
+      .pop() ?? ""
+  ).toLowerCase();
+
+  if (
+    !ALLOWED_MODEL_EXTENSIONS.has(ext)
+  ) {
+    throw new HttpError(
+      400,
+      "فرمت فایل سه‌بعدی مجاز نیست. فقط GLB، GLTF و USDZ پذیرفته می‌شود."
+    );
   }
 
+  // ---------------------------------------------------------------
+  // GLB
+  // ---------------------------------------------------------------
+
   if (ext === "glb") {
-    // glTF binary spec: first 4 bytes must be ASCII "glTF" (0x676c5446).
-    const magic = buffer.subarray(0, 4).toString("ascii");
-    if (magic !== "glTF") {
-      throw new HttpError(400, "فایل GLB نامعتبر است (امضای فایل مطابقت ندارد).");
+    if (buffer.length < 12) {
+      throw new HttpError(
+        400,
+        "فایل GLB ناقص یا نامعتبر است."
+      );
     }
-  } else if (ext === "gltf") {
-    // .gltf is JSON — verify it actually parses as JSON with expected keys,
-    // rather than trusting the extension alone.
+
+    const magic =
+      buffer
+        .subarray(0, 4)
+        .toString("ascii");
+
+    if (magic !== "glTF") {
+      throw new HttpError(
+        400,
+        "فایل GLB نامعتبر است (امضای فایل مطابقت ندارد)."
+      );
+    }
+
+    const version =
+      buffer.readUInt32LE(4);
+
+    const declaredLength =
+      buffer.readUInt32LE(8);
+
+    if (version !== 2) {
+      throw new HttpError(
+        400,
+        "فقط GLB نسخه 2 پشتیبانی می‌شود."
+      );
+    }
+
+    if (
+      declaredLength !==
+      buffer.length
+    ) {
+      throw new HttpError(
+        400,
+        "طول فایل GLB با محتوای واقعی آن مطابقت ندارد."
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // GLTF
+  // ---------------------------------------------------------------
+
+  else if (ext === "gltf") {
     try {
-      const parsed = JSON.parse(buffer.toString("utf-8"));
-      if (!parsed.asset || !parsed.asset.version) {
-        throw new Error("missing asset.version");
+      const parsed = JSON.parse(
+        buffer.toString("utf-8")
+      );
+
+      if (
+        !parsed ||
+        typeof parsed !== "object" ||
+        !parsed.asset ||
+        !parsed.asset.version
+      ) {
+        throw new Error(
+          "missing asset.version"
+        );
       }
     } catch {
-      throw new HttpError(400, "فایل GLTF نامعتبر است.");
+      throw new HttpError(
+        400,
+        "فایل GLTF نامعتبر است."
+      );
     }
-  } else if (ext === "usdz") {
-    // USDZ is a (typically uncompressed) ZIP container — verify the ZIP
-    // local-file-header magic number (PK\x03\x04).
-    const magic = buffer.subarray(0, 4);
-    if (!(magic[0] === 0x50 && magic[1] === 0x4b && magic[2] === 0x03 && magic[3] === 0x04)) {
-      throw new HttpError(400, "فایل USDZ نامعتبر است (امضای فایل مطابقت ندارد).");
+  }
+
+  // ---------------------------------------------------------------
+  // USDZ
+  // ---------------------------------------------------------------
+
+  else if (ext === "usdz") {
+    if (buffer.length < 4) {
+      throw new HttpError(
+        400,
+        "فایل USDZ ناقص است."
+      );
+    }
+
+    const isZip =
+      (
+        buffer[0] === 0x50 &&
+        buffer[1] === 0x4b &&
+        buffer[2] === 0x03 &&
+        buffer[3] === 0x04
+      ) ||
+      (
+        buffer[0] === 0x50 &&
+        buffer[1] === 0x4b &&
+        buffer[2] === 0x05 &&
+        buffer[3] === 0x06
+      ) ||
+      (
+        buffer[0] === 0x50 &&
+        buffer[1] === 0x4b &&
+        buffer[2] === 0x07 &&
+        buffer[3] === 0x08
+      );
+
+    if (!isZip) {
+      throw new HttpError(
+        400,
+        "فایل USDZ نامعتبر است (ساختار ZIP پیدا نشد)."
+      );
     }
   }
 
   return ext.toUpperCase();
 }
+
+// ---------------------------------------------------------------------
+// ZIP validation
+// ---------------------------------------------------------------------
+
+export function assertValidZip(
+  buffer: Buffer
+): void {
+  if (!buffer.length) {
+    throw new HttpError(
+      400,
+      "فایل ZIP خالی است."
+    );
+  }
+
+  if (buffer.length < 4) {
+    throw new HttpError(
+      400,
+      "فایل ZIP نامعتبر است."
+    );
+  }
+
+  const isZip =
+    (
+      buffer[0] === 0x50 &&
+      buffer[1] === 0x4b &&
+      buffer[2] === 0x03 &&
+      buffer[3] === 0x04
+    ) ||
+    (
+      buffer[0] === 0x50 &&
+      buffer[1] === 0x4b &&
+      buffer[2] === 0x05 &&
+      buffer[3] === 0x06
+    ) ||
+    (
+      buffer[0] === 0x50 &&
+      buffer[1] === 0x4b &&
+      buffer[2] === 0x07 &&
+      buffer[3] === 0x08
+    );
+
+  if (!isZip) {
+    throw new HttpError(
+      400,
+      "فایل ZIP نامعتبر است."
+    );
+  }
+}
+
+// ---------------------------------------------------------------------
+// Exported limits
+// ---------------------------------------------------------------------
+
+export const uploadLimits = {
+  image: MAX_IMAGE_BYTES,
+  model: MAX_MODEL_BYTES,
+  zip: MAX_ZIP_BYTES,
+  logo: MAX_LOGO_BYTES,
+};
