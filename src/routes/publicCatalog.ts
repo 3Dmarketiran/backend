@@ -135,7 +135,7 @@ publicCatalogRouter.get("/catalog", async (_req, res, next) => {
       slug: seller.slug,
       storeName: seller.storeName,
       description: seller.description,
-      logoUrl: seller.logoUrl,
+      logoUrl: `/api/sellers/by-slug/${encodeURIComponent(seller.slug)}/logo`,
       themeColor: seller.themeColor,
       contactEmail: seller.contactEmail,
       contactPhone: seller.contactPhone,

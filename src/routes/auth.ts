@@ -148,6 +148,7 @@ const serializeUser = (user: any) => ({
         slug: user.seller.slug,
         storeName:
           user.seller.storeName,
+        themeColor: user.seller.themeColor,
       }
     : null,
 });
