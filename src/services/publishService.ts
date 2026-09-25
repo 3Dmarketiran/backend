@@ -648,6 +648,22 @@ async function getPublicProducts(
       ],
     });
 
+  const productIds = products.map((product) => product.id);
+  const viewRows = productIds.length
+    ? await prisma.analyticsEvent.groupBy({
+        by: ["productId"],
+        where: {
+          productId: { in: productIds },
+          type: { in: ["PRODUCT_VIEW", "PRODUCT_DETAIL_VIEW"] },
+        },
+        _count: { _all: true },
+      })
+    : [];
+
+  const viewCounts = new Map(
+    viewRows.map((row) => [row.productId, row._count._all]),
+  );
+
   return products.map(
     (product) => {
       const images =
@@ -703,6 +719,15 @@ async function getPublicProducts(
 
         price:
           product.price,
+
+        isPinned:
+          product.isPinned,
+
+        pinOrder:
+          product.pinOrder,
+
+        viewCount:
+          viewCounts.get(product.id) ?? 0,
 
         tags:
           product.tags

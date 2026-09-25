@@ -25,7 +25,7 @@ import { subscriptionsRouter } from "./routes/subscriptions";
 import { categoriesRouter } from "./routes/categories";
 import { analyticsRouter } from "./routes/analytics";
 import { adminSettingsRouter } from "./routes/adminSettings";
-import { publishingRouter } from "./routes/publishing";
+import { publishingRouter, mountPublishingOnProducts } from "./routes/publishing";
 
 import { expireOverdueSubscriptions } from "./routes/subscriptions";
 
@@ -218,6 +218,7 @@ app.use("/api/health", healthRouter);
 /* -------------------------------------------------------------------------- */
 
 app.use("/api/auth", authRouter);
+mountPublishingOnProducts(productsRouter);
 app.use("/api/products", productsRouter);
 app.use("/api/sellers", sellersRouter);
 app.use("/api/subscriptions", subscriptionsRouter);

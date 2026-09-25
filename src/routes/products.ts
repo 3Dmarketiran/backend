@@ -244,6 +244,29 @@ productsRouter.put(
 );
 
 // ---------------------------------------------------------------------
+// Pin product for the seller storefront (max 3)
+// ---------------------------------------------------------------------
+productsRouter.post(
+  "/:id/pin",
+  requireAuth,
+  requireOwnProduct(),
+  async (req, res, next) => {
+    try {
+      const productId = assertRouteId(req.params.id);
+      const pinned = req.body?.pinned !== false;
+      const product = await productService.setProductPinned(
+        productId,
+        req.user!.seller!.id,
+        pinned,
+      );
+      res.json({ product });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ---------------------------------------------------------------------
 // Delete product
 // ---------------------------------------------------------------------
 

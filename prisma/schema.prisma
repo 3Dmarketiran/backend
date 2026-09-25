@@ -142,6 +142,8 @@ model Product {
   shortDescription String?
   fullDescription  String?
   price         Float?
+  isPinned      Boolean           @default(false)
+  pinOrder      Int?
 
   categoryId  String?
   category    Category?         @relation(fields: [categoryId], references: [id])

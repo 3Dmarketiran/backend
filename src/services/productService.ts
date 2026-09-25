@@ -605,6 +605,47 @@ export async function updateProduct(
   });
 }
 
+export async function setProductPinned(
+  productId: string,
+  sellerId: string,
+  pinned: boolean,
+) {
+  const product = await prisma.product.findFirst({
+    where: { id: productId, sellerId },
+    select: { id: true, isPinned: true },
+  });
+
+  if (!product) {
+    throw new HttpError(404, "محصول یافت نشد.");
+  }
+
+  if (!pinned) {
+    await prisma.product.update({
+      where: { id: productId },
+      data: { isPinned: false, pinOrder: null },
+    });
+    return prisma.product.findUnique({ where: { id: productId } });
+  }
+
+  const pinnedCount = await prisma.product.count({
+    where: { sellerId, isPinned: true, NOT: { id: productId } },
+  });
+
+  if (pinnedCount >= 3) {
+    throw new HttpError(409, "حداکثر ۳ محصول را می‌توانید پین کنید.");
+  }
+
+  const maxOrder = await prisma.product.aggregate({
+    where: { sellerId, isPinned: true },
+    _max: { pinOrder: true },
+  });
+
+  return prisma.product.update({
+    where: { id: productId },
+    data: { isPinned: true, pinOrder: (maxOrder._max.pinOrder ?? 0) + 1 },
+  });
+}
+
 /* -------------------------------------------------------------------------- */
 /* Delete                                                                     */
 /* -------------------------------------------------------------------------- */
