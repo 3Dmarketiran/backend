@@ -54,7 +54,7 @@ const allowedOrigins = env.CORS_ORIGIN
 function isAllowedOrigin(origin?: string) {
   if (!origin) return true;
 
-  return allowedOrigins.includes(origin) || /^https:\/\/3dmarketiran\.github\.io$/.test(origin);
+  return allowedOrigins.includes(origin) || /^https:\/\/3dmarketiran\.github\.io$/.test(origin) || /^https:\/\/(www\.)?3dmarketiran\.ir$/.test(origin);
 }
 
 app.use(
