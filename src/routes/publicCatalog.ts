@@ -20,7 +20,8 @@ export const publicCatalogRouter = Router();
  */
 publicCatalogRouter.get("/assets/*", async (req, res, next) => {
   try {
-    const rawKey = String(req.params[0] ?? "").replace(/^\/+/, "");
+    const wildcardParam = (req.params as Record<string, string | undefined>)["0"];
+    const rawKey = String(wildcardParam ?? "").replace(/^\/+/, "");
     const key = decodeURIComponent(rawKey).replace(/\\/g, "/");
 
     if (!key) {
