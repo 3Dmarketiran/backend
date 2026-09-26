@@ -29,6 +29,12 @@ export interface StorageProvider {
 
   read(storageKey: string): Promise<Buffer>;
 
+  /** Stream a stored object without buffering the entire file in memory. */
+  readStream(storageKey: string): Promise<{
+    stream: NodeJS.ReadableStream;
+    contentLength?: number;
+  }>;
+
   healthCheck(): Promise<{
     ok: boolean;
     message?: string;

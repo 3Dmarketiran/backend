@@ -164,6 +164,29 @@ export class S3StorageProvider implements StorageProvider {
     return Buffer.from(await result.Body.transformToByteArray());
   }
 
+  async readStream(storageKey: string): Promise<{
+    stream: NodeJS.ReadableStream;
+    contentLength?: number;
+  }> {
+    const key = sanitizeStorageKey(storageKey);
+
+    const result = await this.client.send(
+      new GetObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+      })
+    );
+
+    if (!result.Body) {
+      throw new Error("Storage object has no body.");
+    }
+
+    return {
+      stream: result.Body as unknown as NodeJS.ReadableStream,
+      contentLength: result.ContentLength,
+    };
+  }
+
   async healthCheck(): Promise<{ ok: boolean; message?: string }> {
     try {
       await this.client.send(

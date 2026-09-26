@@ -238,6 +238,21 @@ export class LocalStorageProvider implements StorageProvider {
     return fs.readFile(target);
   }
 
+  async readStream(storageKey: string): Promise<{
+    stream: NodeJS.ReadableStream;
+    contentLength?: number;
+  }> {
+    const safeKey = sanitizeStorageKey(storageKey);
+    const target = safeResolve(this.root, safeKey);
+    const stat = await fs.stat(target);
+
+    const fsModule = await import("node:fs");
+    return {
+      stream: fsModule.createReadStream(target),
+      contentLength: stat.size,
+    };
+  }
+
   async healthCheck(): Promise<{
     ok: boolean;
     message?: string;
