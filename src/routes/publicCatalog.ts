@@ -89,25 +89,15 @@ publicCatalogRouter.get("/assets/*", async (req, res, next) => {
       throw new HttpError(404, "فایل عمومی پیدا نشد.");
     }
 
+    const buffer = await storage.read(key);
     const contentType = getAssetContentType(key);
-    const { stream, contentLength } = await storage.readStream(key);
 
-    res.status(200);
     res.setHeader("Content-Type", contentType);
-    if (contentLength != null) {
-      res.setHeader("Content-Length", String(contentLength));
-    }
+    res.setHeader("Content-Length", String(buffer.byteLength));
     res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
-    res.setHeader("Accept-Ranges", "bytes");
-
-    req.on("close", () => {
-      const destroyable = stream as NodeJS.ReadableStream & { destroy?: () => void };
-      if (!res.writableEnded) destroyable.destroy?.();
-    });
-
-    (stream as NodeJS.ReadableStream & { pipe: (destination: NodeJS.WritableStream) => unknown }).pipe(res);
+    res.send(buffer);
   } catch (error) {
     next(error);
   }
