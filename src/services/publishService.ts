@@ -793,6 +793,9 @@ async function getPublicProducts(
             .filter(Boolean) ??
           [],
 
+        material: product.material ?? null,
+        colors: parseJson(product.colors, []),
+
         category,
 
         seller: {

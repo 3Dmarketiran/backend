@@ -24,6 +24,17 @@ export const createProductSchema = z.object({
   tags:
     z.string().max(500).optional(),
 
+  material:
+    z.string().trim().max(120).optional(),
+
+  colors:
+    z.array(
+      z.object({
+        name: z.string().trim().min(1).max(60),
+        value: z.string().trim().max(80),
+      })
+    ).max(24).optional(),
+
   width:
     z.number().positive().optional(),
 

@@ -148,6 +148,8 @@ model Product {
   categoryId  String?
   category    Category?         @relation(fields: [categoryId], references: [id])
   tags        String?           // comma-separated; normalized in service layer
+  material    String?           // product material / جنس متریال
+  colors      String?           // JSON-serialized color labels / hex values
 
   // Real-world dimensions, normalized internally to millimeters
   // (see utils/dimensions.ts)

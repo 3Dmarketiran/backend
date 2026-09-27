@@ -441,6 +441,12 @@ export async function createProduct(
       tags:
         input.tags,
 
+      material:
+        input.material,
+
+      colors:
+        input.colors === undefined ? undefined : JSON.stringify(input.colors),
+
       visibility:
         "DRAFT",
 
@@ -531,6 +537,10 @@ export async function updateProduct(
       undefined ||
     input.tags !==
       undefined ||
+    input.material !==
+      undefined ||
+    input.colors !==
+      undefined ||
     input.width !==
       undefined ||
     input.height !==
@@ -594,6 +604,16 @@ export async function updateProduct(
         undefined
           ? input.tags
           : existing.tags,
+
+      material:
+        input.material !== undefined
+          ? input.material || null
+          : existing.material,
+
+      colors:
+        input.colors !== undefined
+          ? JSON.stringify(input.colors)
+          : existing.colors,
 
       visibility:
         nextVisibility,

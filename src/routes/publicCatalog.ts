@@ -202,6 +202,10 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
       shortDescription: product.shortDescription,
       fullDescription: product.fullDescription,
       tags: product.tags?.split(",").map((tag) => tag.trim()).filter(Boolean) ?? [],
+      material: product.material ?? null,
+      colors: (() => {
+        try { return product.colors ? JSON.parse(product.colors) : []; } catch { return []; }
+      })(),
       price: product.price,
       isPinned: product.isPinned,
       pinOrder: product.pinOrder,
