@@ -34,8 +34,9 @@ publicCatalogRouter.get("/assets/*", async (req, res, next) => {
     const now = new Date();
 
     if (resource === "products") {
-      if (!resourceId || parts[2] !== "models") {
-        throw new HttpError(404, "فایل مدل معتبر نیست.");
+      const assetType = parts[2];
+      if (!resourceId || (assetType !== "models" && assetType !== "images")) {
+        throw new HttpError(404, "فایل محصول معتبر نیست.");
       }
 
       const product = await prisma.product.findFirst({
@@ -59,7 +60,7 @@ publicCatalogRouter.get("/assets/*", async (req, res, next) => {
       });
 
       if (!product) {
-        throw new HttpError(404, "فایل مدل منتشرشده پیدا نشد.");
+        throw new HttpError(404, "فایل محصول منتشرشده پیدا نشد.");
       }
     } else if (resource === "sellers") {
       if (!resourceId || parts[2] !== "logo") {
@@ -216,7 +217,10 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
           ? { slug: product.seller.sellerCategory.slug, name: product.seller.sellerCategory.name }
           : null,
       },
-      images: product.images.map((image) => ({ url: image.url, isPrimary: image.isPrimary })),
+      images: product.images.map((image) => ({
+        url: publicAssetUrl(req, image.storageKey),
+        isPrimary: image.isPrimary,
+      })),
       models: product.models.map((model) => ({
         kind: model.kind,
         // Always build the public model URL from storageKey. This prevents a
