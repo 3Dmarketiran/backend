@@ -664,6 +664,14 @@ sellersRouter.put(
                 }
               : {}),
 
+            ...(input.themeColor !==
+            undefined
+              ? {
+                  themeColor:
+                    input.themeColor,
+                }
+              : {}),
+
             ...(input.contactEmail !==
             undefined
               ? {
