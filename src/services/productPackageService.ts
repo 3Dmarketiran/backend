@@ -248,7 +248,7 @@ export async function upsertProductPackage(params: {
           const base = `${safeName(original.originalname, "image").replace(/\.[^.]+$/, "")}.webp`;
           const name = groups.images.find((e) => e.buffer.equals(converted.buffer))?.name || base;
           const exists = await tx.productImage.findFirst({ where: { productId: params.productId, storageKey: packageKey(params.productId, "images", name) } });
-          if (!exists) await tx.productImage.create({ data: { productId: params.productId, url: packageAssetUrl(params.productId, "images", name), storageKey: packageKey(params.productId, "images", name), isPrimary: (await tx.productImage.count({ where: { productId: params.productId } })) === 0, sortOrder: await tx.productImage.count({ where: { productId: params.productId } }), sizeBytes: converted.length } });
+          if (!exists) await tx.productImage.create({ data: { productId: params.productId, url: packageAssetUrl(params.productId, "images", name), storageKey: packageKey(params.productId, "images", name), isPrimary: (await tx.productImage.count({ where: { productId: params.productId } })) === 0, sortOrder: await tx.productImage.count({ where: { productId: params.productId } }), sizeBytes: converted.buffer.length } });
         }
       }
 
