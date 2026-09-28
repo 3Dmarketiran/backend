@@ -22,7 +22,6 @@ import { authRouter } from "./routes/auth";
 import { productsRouter } from "./routes/products";
 import { sellersRouter } from "./routes/sellers";
 import { subscriptionsRouter } from "./routes/subscriptions";
-import { categoriesRouter } from "./routes/categories";
 import { analyticsRouter } from "./routes/analytics";
 import { adminSettingsRouter } from "./routes/adminSettings";
 import { publishingRouter, mountPublishingOnProducts } from "./routes/publishing";
@@ -178,7 +177,6 @@ app.use(
     "/api/products",
     "/api/sellers",
     "/api/subscriptions",
-    "/api/categories",
     "/api/publishing",
     "/api/admin",
   ],
@@ -224,7 +222,6 @@ mountPublishingOnProducts(productsRouter);
 app.use("/api/products", productsRouter);
 app.use("/api/sellers", sellersRouter);
 app.use("/api/subscriptions", subscriptionsRouter);
-app.use("/api/categories", categoriesRouter);
 app.use("/api/analytics", analyticsRouter);
 app.use("/api/admin", adminSettingsRouter);
 app.use("/api/publishing", publishingRouter);

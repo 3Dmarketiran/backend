@@ -9,6 +9,7 @@ import {
   uploadImage,
   uploadModel,
   uploadModelZip,
+  uploadProductPackage,
 } from "../middleware/upload";
 import { HttpError } from "../middleware/errorHandler";
 import {
@@ -19,6 +20,7 @@ import {
 } from "../validators/product";
 import * as productService from "../services/productService";
 import * as assetService from "../services/assetService";
+import * as productPackageService from "../services/productPackageService";
 import { prisma } from "../config/prisma";
 
 export const productsRouter = Router();
@@ -134,9 +136,21 @@ productsRouter.get(
         );
       }
 
-      res.json({
-        product,
-      });
+      const host = req.get("host");
+      const base = host ? `${req.protocol}://${host}` : "";
+      const decorated = {
+        ...product,
+        images: product.images.map((image) => {
+          const ref = productPackageService.parsePackageStorageKey(image.storageKey);
+          return ref ? { ...image, url: `${base}${productPackageService.packageAssetUrl(ref.productId, ref.kind, ref.name)}` } : image;
+        }),
+        models: product.models.map((model) => {
+          const ref = productPackageService.parsePackageStorageKey(model.storageKey);
+          return ref ? { ...model, url: `${base}${productPackageService.packageAssetUrl(ref.productId, ref.kind, ref.name)}` } : model;
+        }),
+      };
+
+      res.json({ product: decorated });
     } catch (err) {
       next(err);
     }
@@ -530,6 +544,45 @@ productsRouter.post(
       res.status(201).json({
         model,
       });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------
+// Unified product asset package upload
+// ---------------------------------------------------------------------
+
+productsRouter.post(
+  "/:id/package",
+  requireAuth,
+  requireOwnProduct(),
+  uploadProductPackage,
+  async (req, res, next) => {
+    try {
+      const productId = assertRouteId(req.params.id, "شناسه محصول نامعتبر است.");
+      const files = (req.files ?? {}) as Record<string, Express.Multer.File[]>;
+      const result = await productPackageService.upsertProductPackage({
+        productId,
+        images: files.images ?? [],
+        models: files.models ?? [],
+        ar: files.ar ?? [],
+      });
+
+      await prisma.auditLog.create({
+        data: {
+          actorId: req.user!.id,
+          productId,
+          sellerId: req.user!.seller!.id,
+          action: "PRODUCT_ASSET_PACKAGE_UPDATED",
+          entity: "ProductAssetPackage",
+          entityId: productId,
+          ipAddress: req.ip,
+        },
+      });
+
+      res.status(201).json({ product: result });
     } catch (err) {
       next(err);
     }

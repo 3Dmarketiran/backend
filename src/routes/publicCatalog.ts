@@ -3,6 +3,7 @@ import { prisma } from "../config/prisma";
 import { parseJson } from "../utils/json";
 import { storage } from "../storage";
 import { HttpError } from "../middleware/errorHandler";
+import { readPackageAsset, getPackageContentType, parsePackageStorageKey, packageAssetUrl } from "../services/productPackageService";
 
 export const publicCatalogRouter = Router();
 
@@ -18,6 +19,29 @@ export const publicCatalogRouter = Router();
  * URL shape intentionally mirrors the storage key so GLTF relative
  * dependencies (.bin/textures) continue to resolve from the same directory.
  */
+publicCatalogRouter.get("/package/:productId/:kind/*", async (req, res, next) => {
+  try {
+    const productId = String(req.params.productId || "");
+    const kind = String(req.params.kind || "") as "images" | "models" | "ar";
+    const raw = String((req.params as Record<string, string | undefined>)["0"] || "").replace(/^\/+/, "");
+    const name = decodeURIComponent(raw).replace(/\\/g, "/");
+    if (!productId || !["images", "models", "ar"].includes(kind) || !name || name.includes("..")) throw new HttpError(404, "فایل عمومی پیدا نشد.");
+    const now = new Date();
+    const product = await prisma.product.findFirst({
+      where: { id: productId, visibility: "PUBLISHED", hasUnpublishedChanges: false, seller: { isActive: true, subscriptions: { some: { status: "ACTIVE", startDate: { lte: now }, endDate: { gte: now }, plan: { is: { isActive: true } } } } } },
+      select: { id: true },
+    });
+    if (!product) throw new HttpError(404, "فایل محصول منتشرشده پیدا نشد.");
+    const buffer = await readPackageAsset(productId, kind, name);
+    res.setHeader("Content-Type", getPackageContentType(name));
+    res.setHeader("Content-Length", String(buffer.byteLength));
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    res.send(buffer);
+  } catch (error) { next(error); }
+});
+
 publicCatalogRouter.get("/assets/*", async (req, res, next) => {
   try {
     const wildcardParam = (req.params as Record<string, string | undefined>)["0"];
@@ -104,6 +128,15 @@ publicCatalogRouter.get("/assets/*", async (req, res, next) => {
   }
 });
 
+function shuffle<T>(items: T[]): T[] {
+  const copy = [...items];
+  for (let i = copy.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
 /**
  * Live public catalog. This endpoint is intentionally read-only and does not
  * require authentication. GitHub Pages uses it as the live source of truth;
@@ -113,7 +146,7 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
   try {
     const now = new Date();
 
-    const [products, sellers, categories, settings, plans] = await Promise.all([
+    const [products, sellers, settings, plans] = await Promise.all([
       prisma.product.findMany({
         where: {
           AND: [
@@ -144,11 +177,7 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
               id: true,
               slug: true,
               storeName: true,
-              sellerCategory: { select: { slug: true, name: true } },
             },
-          },
-          category: {
-            select: { slug: true, name: true, isActive: true },
           },
         },
         orderBy: [{ publishedAt: "desc" }, { createdAt: "desc" }],
@@ -165,15 +194,6 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
             },
           },
         },
-        orderBy: { storeName: "asc" },
-        include: {
-          sellerCategory: { select: { slug: true, name: true } },
-        },
-      }),
-      prisma.category.findMany({
-        where: { isActive: true },
-        select: { id: true, slug: true, name: true, isActive: true },
-        orderBy: { name: "asc" },
       }),
       prisma.platformSetting.findUnique({ where: { id: "singleton" } }),
       prisma.subscriptionPlan.findMany({
@@ -210,27 +230,25 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
       isPinned: product.isPinned,
       pinOrder: product.pinOrder,
       viewCount: viewCounts.get(product.id) ?? 0,
-      category: product.category?.isActive
-        ? { slug: product.category.slug, name: product.category.name }
-        : null,
       seller: {
         id: product.seller.id,
         slug: product.seller.slug,
         storeName: product.seller.storeName,
-        category: product.seller.sellerCategory
-          ? { slug: product.seller.sellerCategory.slug, name: product.seller.sellerCategory.name }
-          : null,
       },
-      images: product.images.map((image) => ({
-        url: publicAssetUrl(req, image.storageKey),
-        isPrimary: image.isPrimary,
-      })),
-      models: product.models.map((model) => ({
-        kind: model.kind,
-        // Always build the public model URL from storageKey. This prevents a
-        // custom-domain migration from leaving old provider URLs in the DB.
-        url: publicAssetUrl(req, model.storageKey),
-      })),
+      images: product.images.map((image) => {
+        const ref = parsePackageStorageKey(image.storageKey);
+        return {
+          url: ref ? absolutePackageUrl(req, packageAssetUrl(ref.productId, ref.kind, ref.name)) : publicAssetUrl(req, image.storageKey),
+          isPrimary: image.isPrimary,
+        };
+      }),
+      models: product.models.map((model) => {
+        const ref = parsePackageStorageKey(model.storageKey);
+        return {
+          kind: model.kind,
+          url: ref ? absolutePackageUrl(req, packageAssetUrl(ref.productId, ref.kind, ref.name)) : publicAssetUrl(req, model.storageKey),
+        };
+      }),
       dimensions: product.widthMm || product.heightMm || product.depthMm
         ? {
             widthM: product.widthMm != null ? product.widthMm / 1000 : null,
@@ -242,7 +260,7 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
       publishedAt: product.publishedAt,
     }));
 
-    const publicSellers = sellers.map((seller) => ({
+    const publicSellers = shuffle(sellers).map((seller) => ({
       id: seller.id,
       slug: seller.slug,
       storeName: seller.storeName,
@@ -254,9 +272,6 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
       contactEmail: seller.contactEmail,
       contactPhone: seller.contactPhone,
       address: seller.address,
-      category: seller.sellerCategory
-        ? { slug: seller.sellerCategory.slug, name: seller.sellerCategory.name }
-        : null,
       socialLinks: parseJson(seller.socialLinks, {}),
     }));
 
@@ -267,7 +282,6 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
       version: `live-${Date.now()}`,
       products: publicProducts,
       sellers: publicSellers,
-      categories,
       settings: settings ?? {},
       plans: plans.map((plan) => ({
         id: plan.id,
@@ -312,6 +326,12 @@ function extractStorageKey(value: string): string | null {
   } catch {
     return null;
   }
+}
+
+function absolutePackageUrl(req: { protocol: string; get(name: string): string | undefined }, relative: string): string {
+  const host = req.get("host");
+  if (!host) throw new HttpError(500, "آدرس عمومی Backend تنظیم نشده است.");
+  return `${req.protocol}://${host}${relative}`;
 }
 
 function publicAssetUrl(req: { protocol: string; get(name: string): string | undefined }, storageKey: string): string {

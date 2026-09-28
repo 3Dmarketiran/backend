@@ -8,6 +8,7 @@ import {
   assertValidModel,
 } from "../middleware/upload";
 import { HttpError } from "../middleware/errorHandler";
+import { parsePackageStorageKey, removePackageAsset } from "./productPackageService";
 
 const MAX_ZIP_ENTRIES = 50;
 const MAX_EXTRACTED_BYTES = 300 * 1024 * 1024;
@@ -289,9 +290,12 @@ export async function deleteProductImage(
     },
   });
 
-  await storage
-    .delete(image.storageKey)
-    .catch(() => undefined);
+  const imagePackage = parsePackageStorageKey(image.storageKey);
+  if (imagePackage) {
+    await removePackageAsset(productId, imagePackage.kind, imagePackage.name);
+  } else {
+    await storage.delete(image.storageKey).catch(() => undefined);
+  }
 
   if (image.isPrimary) {
     const next =
@@ -827,9 +831,12 @@ export async function deleteProductModel(
     },
   });
 
-  await storage
-    .delete(model.storageKey)
-    .catch(() => undefined);
+  const modelPackage = parsePackageStorageKey(model.storageKey);
+  if (modelPackage) {
+    await removePackageAsset(productId, modelPackage.kind, modelPackage.name);
+  } else {
+    await storage.delete(model.storageKey).catch(() => undefined);
+  }
 
   await markUnpublishedIfNeeded(
     productId

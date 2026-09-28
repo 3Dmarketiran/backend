@@ -224,15 +224,12 @@ async function processPublishJob(
     const [
       products,
       sellers,
-      categories,
       settings,
       plans,
     ] = await Promise.all([
       getPublicProducts(jobId),
 
       getPublicSellers(),
-
-      getPublicCategories(),
 
       prisma.platformSetting.findUnique({
         where: {
@@ -248,7 +245,7 @@ async function processPublishJob(
 
     await log(
       jobId,
-      `تولید داده استاتیک: ${products.length} محصول، ${sellers.length} فروشنده، ${categories.length} دسته‌بندی فعال.`
+      `تولید داده استاتیک: ${products.length} محصول و ${sellers.length} فروشنده.`
     );
 
     /*
@@ -286,17 +283,6 @@ async function processPublishJob(
 
     lastCommitSha =
       await upsertFile(
-        `${PUBLIC_DATA_DIR}/categories.json`,
-        JSON.stringify(
-          categories,
-          null,
-          2
-        ),
-        `chore(publish): update categories.json [job ${jobId}]`
-      );
-
-    lastCommitSha =
-      await upsertFile(
         `${PUBLIC_DATA_DIR}/settings.json`,
         JSON.stringify(
           settings ?? {},
@@ -327,10 +313,9 @@ async function processPublishJob(
     const catalogPayload = {
       schemaVersion: 1,
       generatedAt: new Date().toISOString(),
-      version: createCatalogVersion({ products, sellers, categories, settings: settings ?? {}, plans }),
+      version: createCatalogVersion({ products, sellers, settings: settings ?? {}, plans }),
       products,
       sellers,
-      categories,
       settings: settings ?? {},
       plans: plans.map((plan) => ({ id: plan.id, name: plan.name, durationDays: plan.durationDays, price: plan.price, discountPct: plan.discountPct, productLimit: plan.productLimit, storageLimitMb: plan.storageLimitMb, features: parseJson(plan.features, {}) })),
     };
@@ -671,20 +656,6 @@ async function getPublicProducts(
             id: true,
             slug: true,
             storeName: true,
-            sellerCategory: {
-              select: {
-                slug: true,
-                name: true,
-              },
-            },
-          },
-        },
-
-        category: {
-          select: {
-            slug: true,
-            name: true,
-            isActive: true,
           },
         },
       },
@@ -742,19 +713,6 @@ async function getPublicProducts(
           })
         );
 
-      const category =
-        product.category?.isActive
-          ? {
-              slug:
-                product.category
-                  .slug,
-
-              name:
-                product.category
-                  .name,
-            }
-          : null;
-
       return {
         id:
           product.id,
@@ -796,8 +754,6 @@ async function getPublicProducts(
         material: product.material ?? null,
         colors: parseJson(product.colors, []),
 
-        category,
-
         seller: {
           id: product.seller.id,
           slug:
@@ -807,16 +763,6 @@ async function getPublicProducts(
           storeName:
             product.seller
               .storeName,
-
-          category:
-            product.seller.sellerCategory
-              ? {
-                  slug:
-                    product.seller.sellerCategory.slug,
-                  name:
-                    product.seller.sellerCategory.name,
-                }
-              : null,
         },
 
         images,
@@ -866,6 +812,15 @@ async function getPublicProducts(
  *
  * Only active sellers with a currently active subscription are exposed.
  */
+function shuffle<T>(items: T[]): T[] {
+  const copy = [...items];
+  for (let i = copy.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
 async function getPublicSellers() {
   const now =
     new Date();
@@ -899,22 +854,9 @@ async function getPublicSellers() {
         },
       },
 
-      orderBy: {
-        storeName:
-          "asc",
-      },
-
-      include: {
-        sellerCategory: {
-          select: {
-            slug: true,
-            name: true,
-          },
-        },
-      },
     });
 
-  return sellers.map(
+  return shuffle(sellers).map(
     (seller) => ({
       id: seller.id,
       slug:
@@ -941,14 +883,6 @@ async function getPublicSellers() {
       address:
         seller.address,
 
-      category:
-        seller.sellerCategory
-          ? {
-              slug: seller.sellerCategory.slug,
-              name: seller.sellerCategory.name,
-            }
-          : null,
-
       socialLinks:
         parseJson(
           seller.socialLinks,
@@ -958,34 +892,6 @@ async function getPublicSellers() {
   );
 }
 
-/**
- * Generates the public category catalog.
- *
- * Only active categories are published.
- */
-async function getPublicCategories() {
-  return prisma.category.findMany({
-    where: {
-      isActive:
-        true,
-    },
-
-    select: {
-      id: true,
-      slug: true,
-      name: true,
-      isActive: true,
-      parentId: true,
-    },
-
-    orderBy: [
-      {
-        name:
-          "asc",
-      },
-    ],
-  });
-}
 
 /* -------------------------------------------------------------------------- */
 /* Seller subscription re-publish                                             */
@@ -1049,7 +955,7 @@ export async function republishForSeller(
 
 /**
  * Regenerates the public snapshot for every seller.
- * Used for platform-wide metadata changes such as seller categories.
+ * Used for platform-wide metadata changes.
  */
 export async function republishForAllSellers(
   triggeredByUserId: string

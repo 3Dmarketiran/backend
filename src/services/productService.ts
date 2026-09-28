@@ -1,5 +1,6 @@
 import { prisma } from "../config/prisma";
 import { storage } from "../storage";
+import { parsePackageStorageKey } from "./productPackageService";
 import { slugify } from "../utils/slug";
 import { toMillimeters } from "../utils/dimensions";
 import { HttpError } from "../middleware/errorHandler";
@@ -682,6 +683,7 @@ export async function deleteProduct(
       include: {
         images: true,
         models: true,
+        assetPackage: true,
       },
     });
 
@@ -696,28 +698,20 @@ export async function deleteProduct(
    * Best-effort storage cleanup.
    * Database deletion remains authoritative.
    */
-  await Promise.all([
-    ...product.images.map(
-      (image) =>
-        storage
-          .delete(
-            image.storageKey
-          )
-          .catch(
-            () => undefined
-          )
-    ),
+  const packageKey = [...product.images, ...product.models]
+    .map((asset) => parsePackageStorageKey(asset.storageKey))
+    .find(Boolean);
 
-    ...product.models.map(
-      (model) =>
-        storage
-          .delete(
-            model.storageKey
-          )
-          .catch(
-            () => undefined
-          )
-    ),
+  await Promise.all([
+    ...(packageKey && product.assetPackage
+      ? [storage.delete(product.assetPackage.storageKey).catch(() => undefined)]
+      : []),
+    ...product.images
+      .filter((image) => !parsePackageStorageKey(image.storageKey))
+      .map((image) => storage.delete(image.storageKey).catch(() => undefined)),
+    ...product.models
+      .filter((model) => !parsePackageStorageKey(model.storageKey))
+      .map((model) => storage.delete(model.storageKey).catch(() => undefined)),
   ]);
 
   await prisma.product.delete({

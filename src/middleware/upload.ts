@@ -45,6 +45,18 @@ export const uploadModelZip = multer({
   },
 }).single("modelZip");
 
+export const uploadProductPackage = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: MAX_ZIP_BYTES,
+    files: 35,
+  },
+}).fields([
+  { name: "images", maxCount: 20 },
+  { name: "models", maxCount: 10 },
+  { name: "ar", maxCount: 5 },
+]);
+
 // Logo upload middleware.
 //
 // This is intentionally wrapped instead of exporting multer().single()
