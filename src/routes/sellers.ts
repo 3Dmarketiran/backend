@@ -775,6 +775,41 @@ sellersRouter.put(
 // ---------------------------------------------------------------------
 // Seller logo upload
 //
+// GET /api/sellers/:id/logo
+// Authenticated seller preview endpoint. This deliberately does not depend on
+// the public subscription gate because the seller must be able to preview the
+// logo from inside their own dashboard even before/after publication.
+sellersRouter.get(
+  "/:id/logo",
+  requireAuth,
+  requireOwnSeller(),
+  async (req, res, next) => {
+    try {
+      const sellerId = assertRouteId(req.params.id, "شناسه فروشنده نامعتبر است.");
+      const seller = await prisma.seller.findUnique({
+        where: { id: sellerId },
+        select: { logoUrl: true },
+      });
+      if (!seller?.logoUrl) return res.status(404).end();
+
+      const storageKey = extractStorageKeyFromUrl(seller.logoUrl);
+      if (!storageKey) return res.redirect(seller.logoUrl);
+
+      const buffer = await storage.read(storageKey);
+      const extension = storageKey.split(".").pop()?.toLowerCase();
+      const contentTypes: Record<string, string> = {
+        jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+        webp: "image/webp", gif: "image/gif", svg: "image/svg+xml",
+      };
+      res.setHeader("Content-Type", contentTypes[extension || ""] || "application/octet-stream");
+      res.setHeader("Cache-Control", "private, max-age=300");
+      return res.send(buffer);
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
 // POST /api/sellers/:id/logo
 //
 // Validation and the 5MB limit are handled by uploadLogo.
