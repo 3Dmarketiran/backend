@@ -4,7 +4,7 @@ import { fromBuffer } from "file-type";
 import { HttpError } from "../middleware/errorHandler";
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10MB
-const MAX_MODEL_BYTES = 100 * 1024 * 1024; // 100MB
+const MAX_MODEL_BYTES = 50 * 1024 * 1024; // 50MB per asset
 const MAX_ZIP_BYTES = 150 * 1024 * 1024; // 150MB
 const MAX_LOGO_BYTES = 5 * 1024 * 1024; // 5MB
 
@@ -48,7 +48,7 @@ export const uploadModelZip = multer({
 export const uploadProductPackage = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: MAX_ZIP_BYTES,
+    fileSize: MAX_MODEL_BYTES,
     files: 35,
   },
 }).fields([

@@ -12,7 +12,7 @@ import { parsePackageStorageKey, removePackageAsset } from "./productPackageServ
 
 const MAX_ZIP_ENTRIES = 50;
 const MAX_EXTRACTED_BYTES = 300 * 1024 * 1024;
-const MAX_SINGLE_EXTRACTED_FILE = 100 * 1024 * 1024;
+const MAX_SINGLE_EXTRACTED_FILE = 50 * 1024 * 1024;
 
 const MODEL_EXTENSIONS = new Set([
   "glb",
@@ -604,7 +604,7 @@ export async function addProductModelsFromZip(
     ) {
       throw new HttpError(
         400,
-        `فایل ${safePath} پس از استخراج بیش از 100MB خواهد بود.`
+        `فایل ${safePath} پس از استخراج بیش از 50MB خواهد بود.`
       );
     }
 
@@ -617,7 +617,7 @@ export async function addProductModelsFromZip(
     ) {
       throw new HttpError(
         400,
-        `فایل ${safePath} بیش از 100MB است.`
+        `فایل ${safePath} بیش از 50MB است.`
       );
     }
 

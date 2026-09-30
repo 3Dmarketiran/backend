@@ -293,20 +293,24 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
         slug: product.seller.slug,
         storeName: product.seller.storeName,
       },
-      images: product.images.map((image) => {
+      images: await Promise.all(product.images.map(async (image) => {
         const ref = parsePackageStorageKey(image.storageKey);
         return {
-          url: ref ? absolutePackageUrl(req, packageAssetUrl(ref.productId, ref.kind, ref.name)) : publicAssetUrl(req, image.storageKey),
+          url: ref
+            ? absolutePackageUrl(req, packageAssetUrl(ref.productId, ref.kind, ref.name))
+            : await resolveAssetUrl(req, image.storageKey, image.url),
           isPrimary: image.isPrimary,
         };
-      }),
-      models: product.models.map((model) => {
+      })),
+      models: await Promise.all(product.models.map(async (model) => {
         const ref = parsePackageStorageKey(model.storageKey);
         return {
           kind: model.kind,
-          url: ref ? absolutePackageUrl(req, packageAssetUrl(ref.productId, ref.kind, ref.name)) : publicAssetUrl(req, model.storageKey),
+          url: ref
+            ? absolutePackageUrl(req, packageAssetUrl(ref.productId, ref.kind, ref.name))
+            : await resolveAssetUrl(req, model.storageKey, model.url),
         };
-      }),
+      })),
       dimensions: product.widthMm || product.heightMm || product.depthMm
         ? {
             widthM: product.widthMm != null ? product.widthMm / 1000 : null,
@@ -324,7 +328,7 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
       storeName: seller.storeName,
       description: seller.description,
       logoUrl: seller.logoUrl
-        ? publicLogoUrl(req, seller.logoUrl)
+        ? await publicLogoUrl(req, seller.logoUrl)
         : null,
       themeColor: seller.themeColor,
       contactEmail: seller.contactEmail,
@@ -368,32 +372,16 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
 });
 
 
-function publicLogoUrl(req: { protocol: string; get(name: string): string | undefined }, logoUrl: string): string {
+async function publicLogoUrl(req: { protocol: string; get(name: string): string | undefined }, logoUrl: string): Promise<string> {
   const storageKey = extractStorageKey(logoUrl);
-  if (storageKey) return publicAssetUrl(req, storageKey);
+  if (storageKey) return resolveAssetUrl(req, storageKey, logoUrl);
   if (/^https?:\/\//i.test(logoUrl)) return logoUrl;
   if (/^\/api\/sellers\//i.test(logoUrl)) {
     const host = req.get("host");
     if (!host) throw new HttpError(500, "آدرس عمومی Backend تنظیم نشده است.");
     return `${req.protocol}://${host}${logoUrl}`;
   }
-  return publicAssetUrl(req, logoUrl.replace(/^\/+/, ""));
-}
-
-function extractStorageKey(value: string): string | null {
-  try {
-    const url = new URL(value);
-    const publicBase = process.env.PUBLIC_ASSET_BASE_URL;
-    if (!publicBase) return null;
-    const base = new URL(publicBase.endsWith("/") ? publicBase : `${publicBase}/`);
-    if (url.origin !== base.origin) return null;
-    const basePath = base.pathname.endsWith("/") ? base.pathname : `${base.pathname}/`;
-    if (!url.pathname.startsWith(basePath)) return null;
-    const encoded = url.pathname.slice(basePath.length);
-    return decodeURIComponent(encoded).replace(/^\/+/, "") || null;
-  } catch {
-    return null;
-  }
+  return resolveAssetUrl(req, logoUrl.replace(/^\/+/, ""));
 }
 
 function absolutePackageUrl(req: { protocol: string; get(name: string): string | undefined }, relative: string): string {
@@ -402,14 +390,16 @@ function absolutePackageUrl(req: { protocol: string; get(name: string): string |
   return `${req.protocol}://${host}${relative}`;
 }
 
-function publicAssetUrl(req: { protocol: string; get(name: string): string | undefined }, storageKey: string): string {
-  const host = req.get("host");
-  if (!host) throw new HttpError(500, "آدرس عمومی Backend تنظیم نشده است.");
-  const encodedKey = storageKey
-    .split("/")
-    .map((segment) => encodeURIComponent(segment))
-    .join("/");
-  return `${req.protocol}://${host}/api/public/assets/${encodedKey}`;
+async function resolveAssetUrl(
+  _req: { protocol: string; get(name: string): string | undefined },
+  storageKey: string,
+  storedUrl?: string,
+): Promise<string> {
+  // New uploads already contain the direct Supabase Storage/CDN URL.
+  if (storedUrl && /^https?:\/\//i.test(storedUrl) && !/\/api\/public\/assets\//i.test(storedUrl)) {
+    return storedUrl;
+  }
+  return storage.getUrl(storageKey);
 }
 
 function getAssetContentType(key: string): string {

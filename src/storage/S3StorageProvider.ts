@@ -71,7 +71,7 @@ export class S3StorageProvider implements StorageProvider {
         : {
             forcePathStyle: false,
           }),
-      region: "auto",
+      region: env.STORAGE_REGION,
       credentials: {
         accessKeyId: env.STORAGE_ACCESS_KEY,
         secretAccessKey: env.STORAGE_SECRET_KEY,

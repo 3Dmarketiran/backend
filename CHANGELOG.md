@@ -1,3 +1,12 @@
+
+## V48 — direct Supabase asset delivery
+- Product package uploads now store images, GLB/GLTF/USDZ assets as individual Storage objects instead of a single ZIP streamed through Render.
+- Public catalog responses use direct Storage/CDN URLs for new assets, so normal image/3D/AR views no longer consume Render bandwidth.
+- Added a 50MB per-asset limit for model/package uploads.
+- Kept the old `/api/public/package/...` path only for legacy ZIP-based assets already in the database.
+- Product deletion cleans up direct Storage objects and the package manifest.
+- Added configurable `STORAGE_REGION` for Supabase S3 compatibility.
+
 # خلاصه تغییرات (دیباگ و آماده‌سازی)
 
 ## 1) رفع باگ اصلی: آپلود لوگو / تصویر → «مسیر یافت نشد»

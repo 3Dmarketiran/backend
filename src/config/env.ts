@@ -108,6 +108,12 @@ const envSchema = z
 
     STORAGE_ENDPOINT: optionalUrl,
 
+    STORAGE_REGION: z
+      .string()
+      .trim()
+      .min(1)
+      .default("auto"),
+
     STORAGE_ACCESS_KEY: z
       .string()
       .trim()

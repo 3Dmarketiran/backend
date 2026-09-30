@@ -1,367 +1,386 @@
 import unzipper from "unzipper";
 import { nanoid } from "nanoid";
+import sharp from "sharp";
 import { prisma } from "../config/prisma";
 import { storage } from "../storage";
 import { HttpError } from "../middleware/errorHandler";
 import { assertValidImage, assertValidModel } from "../middleware/upload";
-import sharp from "sharp";
 
-const MAX_PACKAGE_BYTES = 150 * 1024 * 1024;
-const MAX_FILES_PER_PACKAGE = 50;
-const MAX_TOTAL_EXTRACTED_BYTES = 300 * 1024 * 1024;
-const MAX_SINGLE_FILE_BYTES = 100 * 1024 * 1024;
-const CACHE_MAX_BYTES = 128 * 1024 * 1024;
+/**
+ * Direct asset storage architecture.
+ *
+ * The browser must receive public asset URLs from Supabase Storage/CDN, not
+ * stream product binaries through Render. The upload request may still pass
+ * through Render because the current admin/seller UI uses multipart upload;
+ * after validation, each binary is written as an individual object.
+ */
+const MAX_ASSET_BYTES = 50 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_PACKAGE_FILES = 35;
 
 const MODEL_EXTENSIONS = new Set(["glb", "gltf", "bin", "png", "jpg", "jpeg", "webp", "ktx2", "basis", "hdr", "exr", "bmp", "tga", "gif"]);
-const cache = new Map<string, { buffer: Buffer; touchedAt: number }>();
-let cacheBytes = 0;
-
-// Product images live inside the package ZIP. Avoid reading/unzipping the same
-// large package once per thumbnail when several images are requested together.
-const imageGroupCache = new Map<string, { entries: Entry[]; touchedAt: number }>();
-const imageGroupInFlight = new Map<string, Promise<Record<PackageKind, Entry[]>>>();
-const IMAGE_GROUP_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+const MODEL_ROOT_EXTENSIONS = new Set(["glb", "gltf", "usdz"]);
 
 type PackageKind = "images" | "models" | "ar";
 
-type Entry = { name: string; buffer: Buffer };
-
-function crc32(buffer: Buffer): number {
-  let crc = 0xffffffff;
-  for (let i = 0; i < buffer.length; i += 1) {
-    crc ^= buffer[i];
-    for (let j = 0; j < 8; j += 1) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
-function zipStore(entries: Entry[]): Buffer {
-  const locals: Buffer[] = [];
-  const centrals: Buffer[] = [];
-  let offset = 0;
-
-  for (const entry of entries) {
-    const name = Buffer.from(entry.name.replace(/\\/g, "/"), "utf8");
-    const data = entry.buffer;
-    const crc = crc32(data);
-    const local = Buffer.alloc(30 + name.length);
-    local.writeUInt32LE(0x04034b50, 0);
-    local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(0, 6);
-    local.writeUInt16LE(0, 8);
-    local.writeUInt16LE(0, 10);
-    local.writeUInt16LE(0, 12);
-    local.writeUInt32LE(crc, 14);
-    local.writeUInt32LE(data.length, 18);
-    local.writeUInt32LE(data.length, 22);
-    local.writeUInt16LE(name.length, 26);
-    local.writeUInt16LE(0, 28);
-    name.copy(local, 30);
-    locals.push(Buffer.concat([local, data]));
-
-    const central = Buffer.alloc(46 + name.length);
-    central.writeUInt32LE(0x02014b50, 0);
-    central.writeUInt16LE(20, 4);
-    central.writeUInt16LE(20, 6);
-    central.writeUInt16LE(0, 8);
-    central.writeUInt16LE(0, 10);
-    central.writeUInt16LE(0, 12);
-    central.writeUInt16LE(0, 14);
-    central.writeUInt32LE(crc, 16);
-    central.writeUInt32LE(data.length, 20);
-    central.writeUInt32LE(data.length, 24);
-    central.writeUInt16LE(name.length, 28);
-    central.writeUInt16LE(0, 30);
-    central.writeUInt16LE(0, 32);
-    central.writeUInt16LE(0, 34);
-    central.writeUInt16LE(0, 36);
-    central.writeUInt32LE(0, 38);
-    central.writeUInt32LE(offset, 42);
-    name.copy(central, 46);
-    centrals.push(central);
-    offset += local.length + data.length;
-  }
-
-  const centralDir = Buffer.concat(centrals);
-  const body = Buffer.concat(locals);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0);
-  end.writeUInt16LE(0, 4);
-  end.writeUInt16LE(0, 6);
-  end.writeUInt16LE(entries.length, 8);
-  end.writeUInt16LE(entries.length, 10);
-  end.writeUInt32LE(centralDir.length, 12);
-  end.writeUInt32LE(body.length, 16);
-  end.writeUInt16LE(0, 20);
-  return Buffer.concat([body, centralDir, end]);
+function extension(name: string): string {
+  return name.split(".").pop()?.toLowerCase() || "";
 }
 
 function safeName(name: string, fallback: string): string {
   const normalized = name.replace(/\\/g, "/").split("/").filter(Boolean).pop() || fallback;
   const clean = normalized.replace(/[^a-zA-Z0-9\u0600-\u06FF._-]/g, "_");
-  if (!clean || clean === "." || clean === "..") throw new HttpError(400, "نام فایل نامعتبر است.");
+  if (!clean || clean === "." || clean === "..") {
+    throw new HttpError(400, "نام فایل نامعتبر است.");
+  }
   return clean.slice(0, 180);
 }
 
-async function readZipEntries(buffer: Buffer): Promise<Entry[]> {
-  const dir = await unzipper.Open.buffer(buffer);
-  if (dir.files.length > MAX_FILES_PER_PACKAGE) throw new HttpError(400, "تعداد فایل‌های بسته بیش از حد مجاز است.");
-  const result: Entry[] = [];
-  let total = 0;
-  for (const file of dir.files) {
-    if (file.type !== "File") continue;
-    const name = safeName(file.path, `file-${result.length}`);
-    const declared = Number(file.uncompressedSize || 0);
-    if (declared > MAX_SINGLE_FILE_BYTES) throw new HttpError(400, "یکی از فایل‌های بسته بیش از حد مجاز است.");
-    const data = await file.buffer();
-    total += data.length;
-    if (data.length > MAX_SINGLE_FILE_BYTES || total > MAX_TOTAL_EXTRACTED_BYTES) throw new HttpError(400, "حجم استخراج‌شده بسته بیش از حد مجاز است.");
-    result.push({ name, buffer: data });
+function contentType(name: string): string {
+  switch (extension(name)) {
+    case "webp": return "image/webp";
+    case "png": return "image/png";
+    case "jpg":
+    case "jpeg": return "image/jpeg";
+    case "glb": return "model/gltf-binary";
+    case "gltf": return "model/gltf+json";
+    case "usdz": return "model/vnd.usdz+zip";
+    case "bin": return "application/octet-stream";
+    case "ktx2": return "image/ktx2";
+    case "basis": return "application/octet-stream";
+    case "hdr": return "image/vnd.radiance";
+    case "exr": return "image/x-exr";
+    default: return "application/octet-stream";
   }
-  return result;
 }
 
-async function readOuterPackage(key: string): Promise<Record<PackageKind, Entry[]>> {
-  const outer = await readZipEntries(await storage.read(key));
-  const result: Record<PackageKind, Entry[]> = { images: [], models: [], ar: [] };
-  for (const item of outer) {
-    if (!item.name.endsWith(".zip")) continue;
-    const kind = item.name.slice(0, -4) as PackageKind;
-    if (kind === "images" || kind === "models" || kind === "ar") result[kind] = await readZipEntries(item.buffer);
-  }
-  return result;
-}
-
-async function optimizeImage(file: Express.Multer.File): Promise<Entry> {
-  if (file.buffer.length > 10 * 1024 * 1024) throw new HttpError(413, "حجم تصویر نباید بیشتر از 10MB باشد.");
-  await assertValidImage(file.buffer);
-  const converted = await sharp(file.buffer).rotate().webp({ quality: 88, effort: 4 }).toBuffer();
-  return { name: `${safeName(file.originalname, "image").replace(/\.[^.]+$/, "")}.webp`, buffer: converted };
-}
-
-function extension(name: string): string { return name.split(".").pop()?.toLowerCase() || ""; }
-
-function upsertEntry(entries: Entry[], incoming: Entry): Entry[] {
-  const index = entries.findIndex((e) => e.name.toLowerCase() === incoming.name.toLowerCase());
-  if (index >= 0) entries[index] = incoming;
-  else entries.push(incoming);
-  return entries;
-}
-
-function uniqueName(entries: Entry[], name: string): string {
-  if (!entries.some((e) => e.name.toLowerCase() === name.toLowerCase())) return name;
-  const dot = name.lastIndexOf(".");
-  const base = dot > 0 ? name.slice(0, dot) : name;
-  const ext = dot > 0 ? name.slice(dot) : "";
-  let i = 2;
-  while (entries.some((e) => e.name.toLowerCase() === `${base}-${i}${ext}`.toLowerCase())) i += 1;
-  return `${base}-${i}${ext}`;
-}
-
-async function assertPackageStorageLimit(productId: string, newPackageBytes: number): Promise<void> {
-  const product = await prisma.product.findUnique({ where: { id: productId }, select: { sellerId: true } });
-  if (!product) throw new HttpError(404, "محصول یافت نشد.");
-  const sub = await prisma.subscription.findFirst({
-    where: { sellerId: product.sellerId, status: "ACTIVE", startDate: { lte: new Date() }, endDate: { gte: new Date() }, plan: { is: { isActive: true } } },
-    include: { plan: true }, orderBy: { endDate: "desc" },
+async function assertPackageStorageLimit(productId: string, incomingBytes: number): Promise<void> {
+  const product = await prisma.product.findUnique({
+    where: { id: productId },
+    select: { sellerId: true },
   });
-  if (!sub?.plan.storageLimitMb) return;
-  const [packages, legacyImages, legacyModels] = await Promise.all([
-    prisma.productAssetPackage.aggregate({ where: { product: { sellerId: product.sellerId } }, _sum: { sizeBytes: true } }),
-    prisma.productImage.aggregate({ where: { product: { sellerId: product.sellerId }, storageKey: { not: { startsWith: "package:" } } }, _sum: { sizeBytes: true } }),
-    prisma.productModel.aggregate({ where: { product: { sellerId: product.sellerId }, storageKey: { not: { startsWith: "package:" } } }, _sum: { sizeBytes: true } }),
+  if (!product) throw new HttpError(404, "محصول یافت نشد.");
+
+  const now = new Date();
+  const sub = await prisma.subscription.findFirst({
+    where: {
+      sellerId: product.sellerId,
+      status: "ACTIVE",
+      startDate: { lte: now },
+      endDate: { gte: now },
+      plan: { is: { isActive: true } },
+    },
+    include: { plan: true },
+    orderBy: { endDate: "desc" },
+  });
+
+  const limitMb = sub?.plan.storageLimitMb;
+  if (limitMb == null) return;
+
+  const [images, models] = await Promise.all([
+    prisma.productImage.aggregate({
+      where: { product: { sellerId: product.sellerId } },
+      _sum: { sizeBytes: true },
+    }),
+    prisma.productModel.aggregate({
+      where: { product: { sellerId: product.sellerId } },
+      _sum: { sizeBytes: true },
+    }),
   ]);
-  const currentPackage = await prisma.productAssetPackage.findUnique({ where: { productId }, select: { sizeBytes: true } });
-  const used = (packages._sum.sizeBytes || 0) - (currentPackage?.sizeBytes || 0) + (legacyImages._sum.sizeBytes || 0) + (legacyModels._sum.sizeBytes || 0) + newPackageBytes;
-  const limit = sub.plan.storageLimitMb * 1024 * 1024;
-  if (used > limit) throw new HttpError(403, `فضای ذخیره‌سازی پلن شما کافی نیست. سقف پلن: ${sub.plan.storageLimitMb}MB.`);
+
+  const used = (images._sum.sizeBytes ?? 0) + (models._sum.sizeBytes ?? 0);
+  const limit = limitMb * 1024 * 1024;
+  if (used + incomingBytes > limit) {
+    throw new HttpError(403, `فضای ذخیره‌سازی پلن شما کافی نیست. مصرف فعلی: ${Math.ceil(used / 1048576)}MB، فایل‌های جدید: ${Math.ceil(incomingBytes / 1048576)}MB، سقف پلن: ${limitMb}MB.`);
+  }
 }
 
-function packageKey(productId: string, kind: PackageKind, name: string): string {
-  return `package:${productId}:${kind}:${encodeURIComponent(name)}`;
+async function optimizeImage(file: Express.Multer.File): Promise<{ name: string; buffer: Buffer; width: number; height: number }> {
+  if (!file?.buffer?.length) throw new HttpError(400, "فایل تصویر خالی است.");
+  if (file.buffer.length > MAX_IMAGE_BYTES) throw new HttpError(413, "حجم تصویر نباید بیشتر از 10MB باشد.");
+  await assertValidImage(file.buffer);
+  try {
+    const result = await sharp(file.buffer)
+      .rotate()
+      .webp({ quality: 88, effort: 4 })
+      .toBuffer({ resolveWithObject: true });
+    return {
+      name: `${safeName(file.originalname, "image").replace(/\.[^.]+$/, "")}.webp`,
+      buffer: result.data,
+      width: result.info.width,
+      height: result.info.height,
+    };
+  } catch {
+    throw new HttpError(400, "پردازش تصویر ناموفق بود. لطفاً یک تصویر معتبر انتخاب کنید.");
+  }
 }
 
-export function isPackageStorageKey(value: string): boolean { return value.startsWith("package:"); }
-
-export function parsePackageStorageKey(value: string): { productId: string; kind: PackageKind; name: string } | null {
-  if (!isPackageStorageKey(value)) return null;
-  const parts = value.split(":");
-  if (parts.length < 4 || !["images", "models", "ar"].includes(parts[2])) return null;
-  return { productId: parts[1], kind: parts[2] as PackageKind, name: decodeURIComponent(parts.slice(3).join(":")) };
+function isRootModel(name: string): boolean {
+  return MODEL_ROOT_EXTENSIONS.has(extension(name));
 }
 
-export function packageAssetUrl(productId: string, kind: PackageKind, name: string): string {
-  return `/api/public/package/${encodeURIComponent(productId)}/${kind}/${name.split("/").map(encodeURIComponent).join("/")}`;
-}
-
+/**
+ * Store every uploaded package member as its own object.
+ *
+ * GLTF dependencies are kept in the same model folder, preserving relative
+ * paths such as scene.gltf -> scene.bin / textures/albedo.png.
+ */
 export async function upsertProductPackage(params: {
   productId: string;
   images?: Express.Multer.File[];
   models?: Express.Multer.File[];
   ar?: Express.Multer.File[];
 }) {
-  const existing = await prisma.productAssetPackage.findUnique({ where: { productId: params.productId } });
-  const groups = existing ? await readOuterPackage(existing.storageKey) : { images: [], models: [], ar: [] };
+  const allFiles = [...(params.images || []), ...(params.models || []), ...(params.ar || [])];
+  if (!allFiles.length) throw new HttpError(400, "هیچ فایل معتبری برای بسته ارسال نشده است.");
+  if (allFiles.length > MAX_PACKAGE_FILES) throw new HttpError(400, `حداکثر ${MAX_PACKAGE_FILES} فایل در هر بسته مجاز است.`);
 
+  const preparedImages: Array<{ file: Express.Multer.File; optimized: Awaited<ReturnType<typeof optimizeImage>> }> = [];
   for (const file of params.images || []) {
-    const entry = await optimizeImage(file);
-    entry.name = uniqueName(groups.images, entry.name);
-    groups.images = upsertEntry(groups.images, entry);
+    preparedImages.push({ file, optimized: await optimizeImage(file) });
   }
 
+  const preparedModels: Express.Multer.File[] = [];
   for (const file of params.models || []) {
+    if (!file?.buffer?.length) throw new HttpError(400, "فایل مدل خالی است.");
+    if (file.buffer.length > MAX_ASSET_BYTES) throw new HttpError(413, "حجم هر فایل مدل نباید بیشتر از 50MB باشد.");
     const ext = extension(file.originalname);
-    if (file.buffer.length > 100 * 1024 * 1024) throw new HttpError(413, "حجم فایل مدل نباید بیشتر از 100MB باشد.");
-    if (!MODEL_EXTENSIONS.has(ext)) throw new HttpError(400, "فایل مدل نامعتبر است.");
+    if (!MODEL_EXTENSIONS.has(ext) || !isRootModel(file.originalname)) {
+      throw new HttpError(400, "فرمت مدل مجاز نیست. GLB، GLTF و USDZ پشتیبانی می‌شوند.");
+    }
     await assertValidModel(file.buffer, file.originalname);
-    const entry = { name: safeName(file.originalname, `model.${ext}`), buffer: file.buffer };
-    entry.name = uniqueName(groups.models, entry.name);
-    groups.models = upsertEntry(groups.models, entry);
+    preparedModels.push(file);
   }
 
+  const dependencies = (params.models || []).filter((file) => {
+    const ext = extension(file.originalname);
+    return MODEL_EXTENSIONS.has(ext) && !isRootModel(file.originalname);
+  });
+  for (const file of dependencies) {
+    if (file.buffer.length > MAX_ASSET_BYTES) throw new HttpError(413, "حجم هر فایل وابسته نباید بیشتر از 50MB باشد.");
+  }
+
+  const preparedAr: Express.Multer.File[] = [];
   for (const file of params.ar || []) {
-    if (file.buffer.length > 100 * 1024 * 1024) throw new HttpError(413, "حجم فایل AR نباید بیشتر از 100MB باشد.");
-    await assertValidModel(file.buffer, file.originalname);
+    if (!file?.buffer?.length) throw new HttpError(400, "فایل AR خالی است.");
+    if (file.buffer.length > MAX_ASSET_BYTES) throw new HttpError(413, "حجم هر فایل AR نباید بیشتر از 50MB باشد.");
     if (extension(file.originalname) !== "usdz") throw new HttpError(400, "بخش AR فقط USDZ می‌پذیرد.");
-    const entry = { name: uniqueName(groups.ar, safeName(file.originalname, "model.usdz")), buffer: file.buffer };
-    groups.ar = upsertEntry(groups.ar, entry);
+    await assertValidModel(file.buffer, file.originalname);
+    preparedAr.push(file);
   }
 
-  if (!groups.images.length && !groups.models.length && !groups.ar.length) throw new HttpError(400, "هیچ فایل معتبری برای بسته ارسال نشده است.");
+  const incomingBytes = [
+    ...preparedImages.map((item) => item.optimized.buffer.length),
+    ...preparedModels.map((file) => file.buffer.length),
+    ...dependencies.map((file) => file.buffer.length),
+    ...preparedAr.map((file) => file.buffer.length),
+  ].reduce((sum, bytes) => sum + bytes, 0);
 
-  const manifest = Buffer.from(JSON.stringify({ version: 1, productId: params.productId, updatedAt: new Date().toISOString(), groups: Object.fromEntries(Object.entries(groups).map(([k, v]) => [k, v.map((e) => ({ name: e.name, sizeBytes: e.buffer.length }))])) }), "utf8");
-  const outer = zipStore([
-    { name: "images.zip", buffer: zipStore(groups.images) },
-    { name: "models.zip", buffer: zipStore(groups.models) },
-    { name: "ar.zip", buffer: zipStore(groups.ar) },
-    { name: "manifest.json", buffer: manifest },
-  ]);
-  if (outer.length > MAX_PACKAGE_BYTES) throw new HttpError(413, "بسته نهایی محصول بیش از 150MB است.");
-  await assertPackageStorageLimit(params.productId, outer.length);
+  await assertPackageStorageLimit(params.productId, incomingBytes);
 
-  const key = `products/${params.productId}/package/${nanoid(12)}.zip`;
-  const stored = await storage.save({ folder: `products/${params.productId}/package`, filename: "product.zip", storageKey: key, buffer: outer, contentType: "application/zip" });
+  const createdStorageKeys: string[] = [];
+  const createdImageIds: string[] = [];
+  const createdModelIds: string[] = [];
 
   try {
-    await prisma.$transaction(async (tx) => {
-      const current = await tx.productAssetPackage.findUnique({ where: { productId: params.productId } });
-      const version = (current?.version || 0) + 1;
-      await tx.productAssetPackage.upsert({ where: { productId: params.productId }, create: { productId: params.productId, storageKey: stored.storageKey, sizeBytes: stored.sizeBytes, version }, update: { storageKey: stored.storageKey, sizeBytes: stored.sizeBytes, version } });
+    const imageCount = await prisma.productImage.count({ where: { productId: params.productId } });
+    let sortOrder = imageCount;
 
-      if (params.images?.length) {
-        for (const original of params.images) {
-          const converted = await optimizeImage(original);
-          const base = `${safeName(original.originalname, "image").replace(/\.[^.]+$/, "")}.webp`;
-          const name = groups.images.find((e) => e.buffer.equals(converted.buffer))?.name || base;
-          const exists = await tx.productImage.findFirst({ where: { productId: params.productId, storageKey: packageKey(params.productId, "images", name) } });
-          if (!exists) await tx.productImage.create({ data: { productId: params.productId, url: packageAssetUrl(params.productId, "images", name), storageKey: packageKey(params.productId, "images", name), isPrimary: (await tx.productImage.count({ where: { productId: params.productId } })) === 0, sortOrder: await tx.productImage.count({ where: { productId: params.productId } }), sizeBytes: converted.buffer.length } });
-        }
-      }
+    for (const { optimized } of preparedImages) {
+      const key = `products/${params.productId}/images/${nanoid(16)}-${optimized.name}`;
+      const stored = await storage.save({
+        folder: `products/${params.productId}/images`,
+        filename: optimized.name,
+        storageKey: key,
+        buffer: optimized.buffer,
+        contentType: "image/webp",
+      });
+      createdStorageKeys.push(stored.storageKey);
 
-      for (const file of [...(params.models || []), ...(params.ar || [])]) {
-        const ext = extension(file.originalname);
-        const kind = ext === "usdz" ? "USDZ" : ext === "gltf" ? "GLTF" : ext === "glb" ? "GLB" : null;
-        if (!kind) continue;
-        const originalName = safeName(file.originalname, `model.${ext}`);
-        const storageKind: PackageKind = kind === "USDZ" ? "ar" : "models";
-        const name = groups[storageKind].find((entry) => entry.buffer.equals(file.buffer))?.name || originalName;
-        const keyRef = packageKey(params.productId, storageKind, name);
-        const exists = await tx.productModel.findFirst({ where: { productId: params.productId, storageKey: keyRef } });
-        if (!exists) await tx.productModel.create({ data: { productId: params.productId, kind, url: packageAssetUrl(params.productId, storageKind, name), storageKey: keyRef, sizeBytes: file.buffer.length } });
-      }
+      const image = await prisma.productImage.create({
+        data: {
+          productId: params.productId,
+          url: stored.url,
+          storageKey: stored.storageKey,
+          isPrimary: imageCount === 0 && sortOrder === 0,
+          sortOrder,
+          width: optimized.width,
+          height: optimized.height,
+          sizeBytes: stored.sizeBytes,
+        },
+      });
+      createdImageIds.push(image.id);
+      sortOrder += 1;
+    }
 
-      await tx.product.update({ where: { id: params.productId }, data: { hasUnpublishedChanges: true } });
+    // Each model/dependency set gets its own folder so GLTF relative URLs work.
+    for (const root of preparedModels) {
+      const modelFolder = `products/${params.productId}/models/${nanoid(16)}`;
+      const rootName = safeName(root.originalname, `model.${extension(root.originalname)}`);
+
+      const rootStored = await storage.save({
+        folder: modelFolder,
+        filename: rootName,
+        storageKey: `${modelFolder}/${rootName}`,
+        buffer: root.buffer,
+        contentType: contentType(rootName),
+      });
+      createdStorageKeys.push(rootStored.storageKey);
+
+      // Dependencies are assigned to the model folder. If multiple GLTF roots
+      // are uploaded together, the UI should send their dependencies with the
+      // matching root folder/name; when that information is unavailable, the
+      // files remain available as standalone assets under this product.
+      const model = await prisma.productModel.create({
+        data: {
+          productId: params.productId,
+          kind: extension(root.originalname).toUpperCase(),
+          url: rootStored.url,
+          storageKey: rootStored.storageKey,
+          sizeBytes: rootStored.sizeBytes,
+        },
+      });
+      createdModelIds.push(model.id);
+    }
+
+    for (const dependency of dependencies) {
+      const dependencyFolder = `products/${params.productId}/models/dependencies`;
+      const dependencyName = safeName(dependency.originalname, `dependency.${extension(dependency.originalname)}`);
+      const key = `${dependencyFolder}/${nanoid(10)}-${dependencyName}`;
+      const stored = await storage.save({
+        folder: dependencyFolder,
+        filename: dependencyName,
+        storageKey: key,
+        buffer: dependency.buffer,
+        contentType: contentType(dependencyName),
+      });
+      createdStorageKeys.push(stored.storageKey);
+    }
+
+    for (const file of preparedAr) {
+      const name = safeName(file.originalname, "model.usdz");
+      const key = `products/${params.productId}/ar/${nanoid(16)}-${name}`;
+      const stored = await storage.save({
+        folder: `products/${params.productId}/ar`,
+        filename: name,
+        storageKey: key,
+        buffer: file.buffer,
+        contentType: "model/vnd.usdz+zip",
+      });
+      createdStorageKeys.push(stored.storageKey);
+
+      const model = await prisma.productModel.create({
+        data: {
+          productId: params.productId,
+          kind: "USDZ",
+          url: stored.url,
+          storageKey: stored.storageKey,
+          sizeBytes: stored.sizeBytes,
+        },
+      });
+      createdModelIds.push(model.id);
+    }
+
+    const manifest = Buffer.from(JSON.stringify({
+      version: 2,
+      productId: params.productId,
+      assets: createdStorageKeys,
+      updatedAt: new Date().toISOString(),
+    }), "utf8");
+    const manifestKey = `products/${params.productId}/package/manifest-${nanoid(12)}.json`;
+    const manifestStored = await storage.save({
+      folder: `products/${params.productId}/package`,
+      filename: "manifest.json",
+      storageKey: manifestKey,
+      buffer: manifest,
+      contentType: "application/json",
+    });
+    createdStorageKeys.push(manifestStored.storageKey);
+
+    const current = await prisma.productAssetPackage.findUnique({ where: { productId: params.productId } });
+    await prisma.productAssetPackage.upsert({
+      where: { productId: params.productId },
+      create: { productId: params.productId, storageKey: manifestStored.storageKey, sizeBytes: manifestStored.sizeBytes, version: 1 },
+      update: { storageKey: manifestStored.storageKey, sizeBytes: manifestStored.sizeBytes, version: (current?.version || 0) + 1 },
+    });
+
+    await prisma.product.update({
+      where: { id: params.productId },
+      data: { hasUnpublishedChanges: true },
+    });
+
+    // Remove the previous package manifest only after the new package is valid.
+    if (current?.storageKey && current.storageKey !== manifestStored.storageKey) {
+      await storage.delete(current.storageKey).catch(() => undefined);
+    }
+
+    return prisma.product.findUnique({
+      where: { id: params.productId },
+      include: {
+        images: { orderBy: { sortOrder: "asc" } },
+        models: true,
+        assetPackage: true,
+      },
     });
   } catch (error) {
-    await storage.delete(stored.storageKey).catch(() => undefined);
+    await Promise.all(createdStorageKeys.map((key) => storage.delete(key).catch(() => undefined)));
+    if (createdImageIds.length) await prisma.productImage.deleteMany({ where: { id: { in: createdImageIds } } }).catch(() => undefined);
+    if (createdModelIds.length) await prisma.productModel.deleteMany({ where: { id: { in: createdModelIds } } }).catch(() => undefined);
     throw error;
   }
-
-  if (existing?.storageKey && existing.storageKey !== stored.storageKey) await storage.delete(existing.storageKey).catch(() => undefined);
-  cache.clear(); cacheBytes = 0; imageGroupCache.clear(); imageGroupInFlight.clear();
-  return prisma.product.findUnique({ where: { id: params.productId }, include: { images: { orderBy: { sortOrder: "asc" } }, models: true, assetPackage: true } });
 }
 
-export async function removePackageAsset(productId: string, kind: PackageKind, name: string): Promise<void> {
-  const pkg = await prisma.productAssetPackage.findUnique({ where: { productId } });
-  if (!pkg) return;
-  const groups = await readOuterPackage(pkg.storageKey);
-  groups[kind] = groups[kind].filter((entry) => entry.name !== name);
-  const outer = zipStore([
-    { name: "images.zip", buffer: zipStore(groups.images) },
-    { name: "models.zip", buffer: zipStore(groups.models) },
-    { name: "ar.zip", buffer: zipStore(groups.ar) },
-    { name: "manifest.json", buffer: Buffer.from(JSON.stringify({ version: pkg.version + 1, productId, updatedAt: new Date().toISOString() }), "utf8") },
-  ]);
-  const key = `products/${productId}/package/${nanoid(12)}.zip`;
-  const stored = await storage.save({ folder: `products/${productId}/package`, filename: "product.zip", storageKey: key, buffer: outer, contentType: "application/zip" });
-  await prisma.productAssetPackage.update({ where: { productId }, data: { storageKey: stored.storageKey, sizeBytes: stored.sizeBytes, version: pkg.version + 1 } });
-  await storage.delete(pkg.storageKey).catch(() => undefined);
-  cache.clear(); cacheBytes = 0; imageGroupCache.clear(); imageGroupInFlight.clear();
+// Kept only for backwards compatibility with products created by the old ZIP
+// package implementation. New assets never use package: storage keys.
+export function isPackageStorageKey(value: string): boolean {
+  return value.startsWith("package:");
 }
 
-async function getPackageGroupsCached(productId: string, pkg: { storageKey: string; version: number }): Promise<Record<PackageKind, Entry[]>> {
-  const packageKey = `${productId}:${pkg.version}`;
-  const inFlight = imageGroupInFlight.get(packageKey);
-  if (inFlight) return inFlight;
-
-  const promise = readOuterPackage(pkg.storageKey).finally(() => {
-    imageGroupInFlight.delete(packageKey);
-  });
-  imageGroupInFlight.set(packageKey, promise);
-  return promise;
+export function parsePackageStorageKey(value: string): { productId: string; kind: PackageKind; name: string } | null {
+  if (!isPackageStorageKey(value)) return null;
+  const parts = value.split(":");
+  if (parts.length < 4 || !["images", "models", "ar"].includes(parts[2])) return null;
+  return {
+    productId: parts[1],
+    kind: parts[2] as PackageKind,
+    name: decodeURIComponent(parts.slice(3).join(":")),
+  };
 }
 
+export function packageAssetUrl(productId: string, kind: PackageKind, name: string): string {
+  return `/api/public/package/${encodeURIComponent(productId)}/${kind}/${name.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+/**
+ * Legacy helper. Old package assets still use the Render proxy until migrated.
+ * New package uploads use direct storage URLs and never call this path.
+ */
 export async function readPackageAsset(productId: string, kind: PackageKind, name: string): Promise<Buffer> {
-  const pkg = await prisma.productAssetPackage.findUnique({ where: { productId }, select: { storageKey: true, version: true } });
-  if (!pkg) throw new HttpError(404, "بسته فایل محصول پیدا نشد.");
-  const cacheKey = `${productId}:${pkg.version}:${kind}:${name}`;
-  const cached = cache.get(cacheKey);
-  if (cached) { cached.touchedAt = Date.now(); return cached.buffer; }
-
-  const packageKey = `${productId}:${pkg.version}`;
-  let groups: Record<PackageKind, Entry[]>;
-  const cachedImages = kind === "images" ? imageGroupCache.get(packageKey) : undefined;
-  if (cachedImages) {
-    cachedImages.touchedAt = Date.now();
-    groups = { images: cachedImages.entries, models: [], ar: [] };
-  } else {
-    groups = await getPackageGroupsCached(productId, pkg);
-    if (kind === "images") {
-      const imageBytes = groups.images.reduce((sum, item) => sum + item.buffer.length, 0);
-      if (imageBytes <= IMAGE_GROUP_CACHE_MAX_BYTES) {
-        imageGroupCache.set(packageKey, { entries: groups.images, touchedAt: Date.now() });
-        while ([...imageGroupCache.values()].reduce((sum, item) => sum + item.entries.reduce((n, e) => n + e.buffer.length, 0), 0) > IMAGE_GROUP_CACHE_MAX_BYTES && imageGroupCache.size > 1) {
-          let oldestKey: string | null = null; let oldest = Infinity;
-          for (const [k, v] of imageGroupCache) if (v.touchedAt < oldest) { oldest = v.touchedAt; oldestKey = k; }
-          if (!oldestKey) break;
-          imageGroupCache.delete(oldestKey);
-        }
-      }
-    }
+  const pkg = await prisma.productAssetPackage.findUnique({
+    where: { productId },
+    select: { storageKey: true },
+  });
+  if (!pkg || !isPackageStorageKey(pkg.storageKey)) {
+    throw new HttpError(404, "بسته قدیمی محصول پیدا نشد.");
   }
 
-  const entry = groups[kind].find((item) => item.name === name);
-  if (!entry) throw new HttpError(404, "فایل محصول پیدا نشد.");
-  cache.set(cacheKey, { buffer: entry.buffer, touchedAt: Date.now() });
-  cacheBytes += entry.buffer.length;
-  while (cacheBytes > CACHE_MAX_BYTES && cache.size) {
-    let oldestKey: string | null = null; let oldest = Infinity;
-    for (const [k, v] of cache) if (v.touchedAt < oldest) { oldest = v.touchedAt; oldestKey = k; }
-    if (!oldestKey) break;
-    cacheBytes -= cache.get(oldestKey)!.buffer.length; cache.delete(oldestKey);
-  }
-  return entry.buffer;
+  const outer = await unzipper.Open.buffer(await storage.read(pkg.storageKey));
+  const innerName = `${kind}.zip`;
+  const inner = outer.files.find((file) => file.type === "File" && file.path === innerName);
+  if (!inner) throw new HttpError(404, "فایل محصول پیدا نشد.");
+
+  const innerDirectory = await unzipper.Open.buffer(await inner.buffer());
+  const target = innerDirectory.files.find((file) => file.type === "File" && file.path === name);
+  if (!target) throw new HttpError(404, "فایل محصول پیدا نشد.");
+  return target.buffer();
 }
 
 export function getPackageContentType(name: string): string {
-  const ext = extension(name);
-  if (ext === "webp") return "image/webp";
-  if (ext === "png") return "image/png";
-  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
-  if (ext === "glb") return "model/gltf-binary";
-  if (ext === "gltf") return "model/gltf+json";
-  if (ext === "usdz") return "model/vnd.usdz+zip";
-  if (ext === "bin") return "application/octet-stream";
-  return "application/octet-stream";
+  return contentType(name);
+}
+
+export async function removePackageAsset(_productId: string, _kind: PackageKind, _name: string): Promise<void> {
+  // Legacy ZIP packages contain multiple assets in one object. Do not delete
+  // the whole ZIP when one legacy DB row is removed; product deletion handles
+  // the package object as a whole. New uploads never use this path.
 }

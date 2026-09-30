@@ -698,12 +698,8 @@ export async function deleteProduct(
    * Best-effort storage cleanup.
    * Database deletion remains authoritative.
    */
-  const packageKey = [...product.images, ...product.models]
-    .map((asset) => parsePackageStorageKey(asset.storageKey))
-    .find(Boolean);
-
   await Promise.all([
-    ...(packageKey && product.assetPackage
+    ...(product.assetPackage
       ? [storage.delete(product.assetPackage.storageKey).catch(() => undefined)]
       : []),
     ...product.images
