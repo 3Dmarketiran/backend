@@ -199,7 +199,7 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
   try {
     const now = new Date();
 
-    const [products, sellers, settings, plans] = await Promise.all([
+    const [products, sellers, settings, plans, planCategories] = await Promise.all([
       prisma.product.findMany({
         where: {
           AND: [
@@ -251,7 +251,12 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
       prisma.platformSetting.findUnique({ where: { id: "singleton" } }),
       prisma.subscriptionPlan.findMany({
         where: { isActive: true },
-        orderBy: { durationDays: "asc" },
+        include: { category: true },
+        orderBy: [{ sortOrder: "asc" }, { durationDays: "asc" }],
+      }),
+      prisma.subscriptionPlanCategory.findMany({
+        where: { isActive: true },
+        orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
       }),
     ]);
 
@@ -345,6 +350,16 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
         productLimit: plan.productLimit,
         storageLimitMb: plan.storageLimitMb,
         features: parseJson(plan.features, {}),
+        categoryId: plan.categoryId,
+        sortOrder: plan.sortOrder,
+      })),
+      planCategories: planCategories.map((category) => ({
+        id: category.id,
+        name: category.name,
+        slug: category.slug,
+        description: category.description,
+        sortOrder: category.sortOrder,
+        isActive: category.isActive,
       })),
     });
   } catch (error) {

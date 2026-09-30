@@ -226,6 +226,7 @@ async function processPublishJob(
       sellers,
       settings,
       plans,
+      planCategories,
     ] = await Promise.all([
       getPublicProducts(jobId),
 
@@ -239,7 +240,12 @@ async function processPublishJob(
 
       prisma.subscriptionPlan.findMany({
         where: { isActive: true },
-        orderBy: { durationDays: "asc" },
+        include: { category: true },
+        orderBy: [{ sortOrder: "asc" }, { durationDays: "asc" }],
+      }),
+      prisma.subscriptionPlanCategory.findMany({
+        where: { isActive: true },
+        orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
       }),
     ]);
 
@@ -302,6 +308,8 @@ async function processPublishJob(
         discountPct: plan.discountPct,
         productLimit: plan.productLimit,
         storageLimitMb: plan.storageLimitMb,
+        categoryId: plan.categoryId,
+        sortOrder: plan.sortOrder,
         features: parseJson(plan.features, {}),
       })), null, 2),
       `chore(publish): update plans.json [job ${jobId}]`
@@ -317,7 +325,8 @@ async function processPublishJob(
       products,
       sellers,
       settings: settings ?? {},
-      plans: plans.map((plan) => ({ id: plan.id, name: plan.name, durationDays: plan.durationDays, price: plan.price, discountPct: plan.discountPct, productLimit: plan.productLimit, storageLimitMb: plan.storageLimitMb, features: parseJson(plan.features, {}) })),
+      plans: plans.map((plan) => ({ id: plan.id, name: plan.name, durationDays: plan.durationDays, price: plan.price, discountPct: plan.discountPct, productLimit: plan.productLimit, storageLimitMb: plan.storageLimitMb, categoryId: plan.categoryId, sortOrder: plan.sortOrder, features: parseJson(plan.features, {}) })),
+      planCategories: planCategories.map((category) => ({ id: category.id, name: category.name, slug: category.slug, description: category.description, sortOrder: category.sortOrder, isActive: category.isActive })),
     };
 
     lastCommitSha =

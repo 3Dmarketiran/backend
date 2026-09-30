@@ -97,30 +97,118 @@ function serializeSubscription(
 // Plans
 // ---------------------------------------------------------------------
 
+const categorySchema = z.object({
+  name: z.string().trim().min(2).max(120),
+  slug: z.string().trim().min(2).max(120).regex(/^[a-z0-9-]+$/).optional(),
+  description: z.string().trim().max(500).nullable().optional(),
+  sortOrder: z.number().int().min(0).optional(),
+  isActive: z.boolean().optional(),
+});
+
+subscriptionsRouter.get(
+  "/categories",
+  async (req, res, next) => {
+    try {
+      const adminView = Boolean(req.user && (req.user.role === "ADMIN" || req.user.role === "SUPER_ADMIN"));
+      const categories = await prisma.subscriptionPlanCategory.findMany({
+        where: adminView && req.query.includeInactive === "true" ? {} : { isActive: true },
+        include: {
+          plans: {
+            where: adminView && req.query.includeInactive === "true" ? {} : { isActive: true },
+            orderBy: [{ sortOrder: "asc" }, { durationDays: "asc" }, { createdAt: "asc" }],
+          },
+        },
+        orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+      });
+      res.json({
+        categories: categories.map((category) => ({
+          ...category,
+          plans: category.plans.map(serializePlan),
+        })),
+      });
+    } catch (err) { next(err); }
+  }
+);
+
+subscriptionsRouter.get(
+  "/categories/manage",
+  requireAuth,
+  requireAdmin,
+  async (_req, res, next) => {
+    try {
+      const categories = await prisma.subscriptionPlanCategory.findMany({
+        include: {
+          plans: { orderBy: [{ sortOrder: "asc" }, { durationDays: "asc" }, { createdAt: "asc" }] },
+        },
+        orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+      });
+      res.json({ categories: categories.map((category) => ({ ...category, plans: category.plans.map(serializePlan) })) });
+    } catch (err) { next(err); }
+  }
+);
+
+subscriptionsRouter.post(
+  "/categories",
+  requireAuth,
+  requireAdmin,
+  async (req, res, next) => {
+    try {
+      const input = categorySchema.parse(req.body);
+      const slug = input.slug || input.name.toLowerCase().replace(/[^a-z0-9\u0600-\u06ff]+/g, "-").replace(/^-+|-+$/g, "-") || `category-${Date.now()}`;
+      const category = await prisma.subscriptionPlanCategory.create({
+        data: {
+          name: input.name,
+          slug,
+          description: input.description ?? null,
+          sortOrder: input.sortOrder ?? 0,
+          isActive: input.isActive ?? true,
+        },
+      });
+      await prisma.auditLog.create({ data: { actorId: req.user!.id, action: "SUBSCRIPTION_CATEGORY_CREATED", entity: "SubscriptionPlanCategory", entityId: category.id, metadata: serializeJson({ name: category.name, slug: category.slug }), ipAddress: req.ip } });
+      res.status(201).json({ category });
+    } catch (err) { next(err); }
+  }
+);
+
+subscriptionsRouter.put(
+  "/categories/:id",
+  requireAuth,
+  requireAdmin,
+  async (req, res, next) => {
+    try {
+      const id = assertRouteId(req.params.id, "شناسه دسته‌بندی نامعتبر است.");
+      const input = categorySchema.partial().parse(req.body);
+      const category = await prisma.subscriptionPlanCategory.update({
+        where: { id },
+        data: {
+          ...(input.name !== undefined ? { name: input.name } : {}),
+          ...(input.slug !== undefined ? { slug: input.slug } : {}),
+          ...(input.description !== undefined ? { description: input.description } : {}),
+          ...(input.sortOrder !== undefined ? { sortOrder: input.sortOrder } : {}),
+          ...(input.isActive !== undefined ? { isActive: input.isActive } : {}),
+        },
+      });
+      await prisma.auditLog.create({ data: { actorId: req.user!.id, action: "SUBSCRIPTION_CATEGORY_UPDATED", entity: "SubscriptionPlanCategory", entityId: category.id, metadata: serializeJson({ changedFields: Object.keys(input) }), ipAddress: req.ip } });
+      res.json({ category });
+    } catch (err) { next(err); }
+  }
+);
+
 subscriptionsRouter.get(
   "/plans",
   async (_req, res, next) => {
     try {
-      const plans =
-        await prisma.subscriptionPlan.findMany(
-          {
-            where: {
-              isActive: true,
-            },
-            orderBy: {
-              durationDays: "asc",
-            },
-          }
-        );
-
-      res.json({
-        plans: plans.map(
-          serializePlan
-        ),
+      const plans = await prisma.subscriptionPlan.findMany({
+        where: { isActive: true },
+        include: { category: true },
+        orderBy: [{ sortOrder: "asc" }, { durationDays: "asc" }],
       });
-    } catch (err) {
-      next(err);
-    }
+      const categories = await prisma.subscriptionPlanCategory.findMany({
+        where: { isActive: true },
+        orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+      });
+      res.json({ plans: plans.map(serializePlan), categories });
+    } catch (err) { next(err); }
   }
 );
 
@@ -165,6 +253,9 @@ const planSchema =
       .nullable()
       .optional(),
 
+    categoryId: z.string().trim().min(1).nullable().optional(),
+    sortOrder: z.number().int().min(0).optional(),
+
     isActive: z
       .boolean()
       .optional(),
@@ -206,6 +297,12 @@ subscriptionsRouter.post(
               storageLimitMb:
                 input.storageLimitMb ??
                 null,
+              categoryId:
+                input.categoryId ??
+                null,
+              sortOrder:
+                input.sortOrder ??
+                0,
               isActive:
                 input.isActive ??
                 true,
@@ -332,6 +429,22 @@ subscriptionsRouter.put(
                 ? {
                     storageLimitMb:
                       input.storageLimitMb,
+                  }
+                : {}),
+
+              ...(input.categoryId !==
+              undefined
+                ? {
+                    categoryId:
+                      input.categoryId,
+                  }
+                : {}),
+
+              ...(input.sortOrder !==
+              undefined
+                ? {
+                    sortOrder:
+                      input.sortOrder,
                   }
                 : {}),
 

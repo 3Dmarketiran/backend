@@ -19,6 +19,12 @@ async function main() {
     console.log(`ℹ️  SUPER_ADMIN ${adminEmail} already exists, skipping.`);
   }
 
+  const defaultPlanCategory = await prisma.subscriptionPlanCategory.upsert({
+    where: { slug: "general" },
+    update: { name: "پلن‌های عمومی", isActive: true },
+    create: { id: "subscription-category-general", name: "پلن‌های عمومی", slug: "general", description: "پلن‌های عمومی فروشندگان", sortOrder: 0 },
+  });
+
   const planDefs = [
     { name: "یک ماهه", durationDays: 30, price: 500000 },
     { name: "سه ماهه", durationDays: 90, price: 1350000, discountPct: 10 },
@@ -29,10 +35,15 @@ async function main() {
   for (const plan of planDefs) {
     const found = await prisma.subscriptionPlan.findFirst({ where: { name: plan.name } });
     if (!found) {
-      await prisma.subscriptionPlan.create({ data: plan });
+      await prisma.subscriptionPlan.create({ data: { ...plan, categoryId: defaultPlanCategory.id } });
       console.log(`✅ Created plan: ${plan.name}`);
     }
   }
+
+  await prisma.subscriptionPlan.updateMany({
+    where: { categoryId: null },
+    data: { categoryId: defaultPlanCategory.id },
+  });
 
   await prisma.platformSetting.upsert({
     where: { id: "singleton" },

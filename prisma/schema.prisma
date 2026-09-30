@@ -228,6 +228,22 @@ model ProductModel {
 // Subscriptions
 // ----------------------------------------------------------------
 
+model SubscriptionPlanCategory {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  description String?
+  sortOrder   Int      @default(0)
+  isActive    Boolean  @default(true)
+
+  plans SubscriptionPlan[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive, sortOrder])
+}
+
 model SubscriptionPlan {
   id            String   @id @default(cuid())
   name          String
@@ -237,12 +253,18 @@ model SubscriptionPlan {
   features      String?
   productLimit  Int?
   storageLimitMb Int?
+  categoryId    String?
+  category      SubscriptionPlanCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  sortOrder     Int      @default(0)
   isActive      Boolean  @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   subscriptions Subscription[]
+
+  @@index([categoryId, sortOrder])
+  @@index([isActive, sortOrder])
 }
 
 model Subscription {
