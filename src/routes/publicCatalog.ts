@@ -59,7 +59,7 @@ publicCatalogRouter.get("/assets/*", async (req, res, next) => {
 
     if (resource === "products") {
       const assetType = parts[2];
-      if (!resourceId || (assetType !== "models" && assetType !== "images")) {
+      if (!resourceId || (assetType !== "models" && assetType !== "images" && assetType !== "ar")) {
         throw new HttpError(404, "فایل محصول معتبر نیست.");
       }
 
@@ -318,7 +318,7 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
       storeName: seller.storeName,
       description: seller.description,
       logoUrl: seller.logoUrl
-        ? await publicLogoUrl(req, seller.logoUrl)
+        ? await publicLogoUrl(req, seller.slug, seller.logoUrl)
         : null,
       themeColor: seller.themeColor,
       contactEmail: seller.contactEmail,
@@ -381,14 +381,21 @@ async function resolveCatalogAssetUrl(
   return resolveAssetUrl(req, storageKey, storedUrl);
 }
 
-async function publicLogoUrl(req: { protocol: string; get(name: string): string | undefined }, logoUrl: string): Promise<string> {
+async function publicLogoUrl(
+  req: { protocol: string; get(name: string): string | undefined },
+  sellerSlug: string,
+  logoUrl: string,
+): Promise<string> {
   if (/^https?:\/\//i.test(logoUrl) && !/\/api\/public\//i.test(logoUrl)) return logoUrl;
   const storageKey = extractStorageKey(logoUrl);
   if (storageKey) return resolveAssetUrl(req, storageKey, logoUrl);
+  // Older sellers may still have the authenticated dashboard URL in logoUrl.
+  // Never expose that URL to the public catalog because it requires a JWT.
+  // Use the public slug-based logo endpoint for those legacy records.
   if (/^\/api\/sellers\//i.test(logoUrl)) {
     const host = req.get("host");
     if (!host) throw new HttpError(500, "آدرس عمومی Backend تنظیم نشده است.");
-    return req.protocol + "://" + host + logoUrl;
+    return `${req.protocol}://${host}/api/sellers/by-slug/${encodeURIComponent(sellerSlug)}/logo`;
   }
   return resolveAssetUrl(req, logoUrl.replace(/^\/+/, ""));
 }

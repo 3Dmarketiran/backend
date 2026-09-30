@@ -107,6 +107,7 @@ export class S3StorageProvider implements StorageProvider {
         Key: key,
         Body: params.buffer,
         ContentType: params.contentType,
+        ContentDisposition: "inline",
         CacheControl: "public, max-age=31536000, immutable",
       })
     );
