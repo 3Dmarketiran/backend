@@ -142,6 +142,59 @@ function shuffle<T>(items: T[]): T[] {
  * require authentication. GitHub Pages uses it as the live source of truth;
  * the generated public-data snapshot remains a safe fallback for outages.
  */
+
+
+const visitorCountryCache = new Map<string, { country: string; expiresAt: number }>();
+
+/**
+ * Lightweight country signal used only for the optional Iran connectivity notice.
+ * Cloudflare's CF-IPCountry is preferred when present; otherwise the backend
+ * performs a short, non-persistent lookup using the visitor IP.
+ */
+publicCatalogRouter.get("/visitor-country", async (req, res, next) => {
+  try {
+    const cloudflareCountry = String(req.get("CF-IPCountry") || "").trim().toUpperCase();
+    const viaCloudflare = Boolean(req.get("CF-Ray") || req.get("CF-Connecting-IP"));
+    if (viaCloudflare && /^[A-Z]{2}$/.test(cloudflareCountry)) {
+      res.setHeader("Cache-Control", "private, max-age=300");
+      return res.json({ country: cloudflareCountry });
+    }
+
+    const ip = String(req.ip || "").replace(/^::ffff:/, "").trim();
+    if (!ip || ip === "::1" || ip === "127.0.0.1" || /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(ip)) {
+      res.setHeader("Cache-Control", "private, max-age=300");
+      return res.json({ country: "XX" });
+    }
+
+    const cached = visitorCountryCache.get(ip);
+    if (cached && cached.expiresAt > Date.now()) {
+      res.setHeader("Cache-Control", "private, max-age=300");
+      return res.json({ country: cached.country });
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1500);
+    try {
+      const response = await fetch(`https://ipapi.co/${encodeURIComponent(ip)}/country/`, {
+        signal: controller.signal,
+        headers: { Accept: "text/plain", "User-Agent": "3DMarketIran/1.0" },
+      });
+      const country = response.ok ? (await response.text()).trim().toUpperCase() : "XX";
+      const normalized = /^[A-Z]{2}$/.test(country) ? country : "XX";
+      visitorCountryCache.set(ip, { country: normalized, expiresAt: Date.now() + 10 * 60 * 1000 });
+      res.setHeader("Cache-Control", "private, max-age=300");
+      return res.json({ country: normalized });
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch (error) {
+    if ((error as Error)?.name === "AbortError") {
+      return res.json({ country: "XX" });
+    }
+    next(error);
+  }
+});
+
 publicCatalogRouter.get("/catalog", async (req, res, next) => {
   try {
     const now = new Date();
