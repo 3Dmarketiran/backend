@@ -273,7 +273,7 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
       : [];
     const viewCounts = new Map(viewRows.map((row) => [row.productId, row._count._all]));
 
-    const publicProducts = products.map((product) => ({
+    const publicProducts = await Promise.all(products.map(async (product) => ({
       id: product.id,
       slug: product.slug,
       name: product.name,
@@ -293,24 +293,14 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
         slug: product.seller.slug,
         storeName: product.seller.storeName,
       },
-      images: await Promise.all(product.images.map(async (image) => {
-        const ref = parsePackageStorageKey(image.storageKey);
-        return {
-          url: ref
-            ? absolutePackageUrl(req, packageAssetUrl(ref.productId, ref.kind, ref.name))
-            : await resolveAssetUrl(req, image.storageKey, image.url),
-          isPrimary: image.isPrimary,
-        };
-      })),
-      models: await Promise.all(product.models.map(async (model) => {
-        const ref = parsePackageStorageKey(model.storageKey);
-        return {
-          kind: model.kind,
-          url: ref
-            ? absolutePackageUrl(req, packageAssetUrl(ref.productId, ref.kind, ref.name))
-            : await resolveAssetUrl(req, model.storageKey, model.url),
-        };
-      })),
+      images: await Promise.all(product.images.map(async (image) => ({
+        url: await resolveCatalogAssetUrl(req, image.storageKey, image.url),
+        isPrimary: image.isPrimary,
+      }))),
+      models: await Promise.all(product.models.map(async (model) => ({
+        kind: model.kind,
+        url: await resolveCatalogAssetUrl(req, model.storageKey, model.url),
+      }))),
       dimensions: product.widthMm || product.heightMm || product.depthMm
         ? {
             widthM: product.widthMm != null ? product.widthMm / 1000 : null,
@@ -320,9 +310,9 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
           }
         : null,
       publishedAt: product.publishedAt,
-    }));
+    })));
 
-    const publicSellers = shuffle(sellers).map((seller) => ({
+    const publicSellers = await Promise.all(shuffle(sellers).map(async (seller) => ({
       id: seller.id,
       slug: seller.slug,
       storeName: seller.storeName,
@@ -335,7 +325,7 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
       contactPhone: seller.contactPhone,
       address: seller.address,
       socialLinks: parseJson(seller.socialLinks, {}),
-    }));
+    })));
 
     res.setHeader("Cache-Control", "no-store, max-age=0");
     res.json({
@@ -372,16 +362,58 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
 });
 
 
+async function resolveCatalogAssetUrl(
+  req: { protocol: string; get(name: string): string | undefined },
+  storageKey: string,
+  storedUrl?: string,
+): Promise<string> {
+  // New uploads keep the direct Supabase Storage/CDN URL in the database.
+  if (storedUrl && /^https?:\/\//i.test(storedUrl) && !/\/api\/public\//i.test(storedUrl)) {
+    return storedUrl;
+  }
+
+  // Legacy ZIP-package rows keep the Render proxy as a backwards-compatible fallback.
+  const ref = parsePackageStorageKey(storageKey);
+  if (ref) {
+    return absolutePackageUrl(req, packageAssetUrl(ref.productId, ref.kind, ref.name));
+  }
+
+  return resolveAssetUrl(req, storageKey, storedUrl);
+}
+
 async function publicLogoUrl(req: { protocol: string; get(name: string): string | undefined }, logoUrl: string): Promise<string> {
+  if (/^https?:\/\//i.test(logoUrl) && !/\/api\/public\//i.test(logoUrl)) return logoUrl;
   const storageKey = extractStorageKey(logoUrl);
   if (storageKey) return resolveAssetUrl(req, storageKey, logoUrl);
-  if (/^https?:\/\//i.test(logoUrl)) return logoUrl;
   if (/^\/api\/sellers\//i.test(logoUrl)) {
     const host = req.get("host");
     if (!host) throw new HttpError(500, "آدرس عمومی Backend تنظیم نشده است.");
-    return `${req.protocol}://${host}${logoUrl}`;
+    return req.protocol + "://" + host + logoUrl;
   }
   return resolveAssetUrl(req, logoUrl.replace(/^\/+/, ""));
+}
+
+function extractStorageKey(value: string): string | null {
+  const normalized = String(value || "").trim();
+  if (!normalized) return null;
+
+  if (/^https?:\/\//i.test(normalized)) {
+    try {
+      const url = new URL(normalized);
+      const marker = "/api/public/assets/";
+      const index = url.pathname.indexOf(marker);
+      if (index >= 0) return decodeURIComponent(url.pathname.slice(index + marker.length));
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  const marker = "/api/public/assets/";
+  const index = normalized.indexOf(marker);
+  if (index >= 0) return decodeURIComponent(normalized.slice(index + marker.length));
+  if (/^(products|sellers)\//.test(normalized)) return normalized.replace(/^\/+/, "");
+  return null;
 }
 
 function absolutePackageUrl(req: { protocol: string; get(name: string): string | undefined }, relative: string): string {
