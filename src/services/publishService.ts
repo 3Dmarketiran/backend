@@ -36,6 +36,10 @@ export async function requestPublish(
         id: true,
         sellerId: true,
         visibility: true,
+        widthMm: true,
+        heightMm: true,
+        depthMm: true,
+        models: { select: { kind: true } },
       },
     });
 
@@ -49,6 +53,20 @@ export async function requestPublish(
   await assertSellerCanPublish(
     product.sellerId
   );
+
+  if (product.models.length > 0) {
+    const dimensionsAreComplete =
+      Number.isFinite(product.widthMm) && product.widthMm! > 0 &&
+      Number.isFinite(product.heightMm) && product.heightMm! > 0 &&
+      Number.isFinite(product.depthMm) && product.depthMm! > 0;
+
+    if (!dimensionsAreComplete) {
+      throw new HttpError(
+        400,
+        "برای انتشار محصول دارای 3D/AR باید عرض، ارتفاع و عمق واقعی محصول کامل و بزرگ‌تر از صفر ثبت شده باشد."
+      );
+    }
+  }
 
   const job =
     await prisma.publishJob.create({
@@ -878,7 +896,9 @@ async function getPublicSellers() {
         seller.description,
 
       logoUrl:
-        seller.logoUrl,
+        seller.logoStorageKey
+          ? publicAssetProxyUrl(seller.logoStorageKey)
+          : seller.logoUrl,
 
       themeColor:
         seller.themeColor,
@@ -899,6 +919,16 @@ async function getPublicSellers() {
         ),
     })
   );
+}
+
+
+function publicAssetProxyUrl(storageKey: string): string {
+  const encoded = storageKey
+    .split("/")
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+  return `/api/public/assets/${encoded}`;
 }
 
 

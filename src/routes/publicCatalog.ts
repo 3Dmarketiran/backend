@@ -230,6 +230,7 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
               id: true,
               slug: true,
               storeName: true,
+              logoStorageKey: true,
             },
           },
         },
@@ -318,7 +319,7 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
       storeName: seller.storeName,
       description: seller.description,
       logoUrl: seller.logoUrl
-        ? await publicLogoUrl(req, seller.slug, seller.logoUrl)
+        ? await publicLogoUrl(req, seller.slug, seller.logoUrl, seller.logoStorageKey)
         : null,
       themeColor: seller.themeColor,
       contactEmail: seller.contactEmail,
@@ -385,19 +386,19 @@ async function publicLogoUrl(
   req: { protocol: string; get(name: string): string | undefined },
   sellerSlug: string,
   logoUrl: string,
+  logoStorageKey: string | null | undefined,
 ): Promise<string> {
-  if (/^https?:\/\//i.test(logoUrl) && !/\/api\/public\//i.test(logoUrl)) return logoUrl;
-  const storageKey = extractStorageKey(logoUrl);
-  if (storageKey) return resolveAssetUrl(req, storageKey, logoUrl);
-  // Older sellers may still have the authenticated dashboard URL in logoUrl.
-  // Never expose that URL to the public catalog because it requires a JWT.
-  // Use the public slug-based logo endpoint for those legacy records.
-  if (/^\/api\/sellers\//i.test(logoUrl)) {
-    const host = req.get("host");
-    if (!host) throw new HttpError(500, "آدرس عمومی Backend تنظیم نشده است.");
-    return `${req.protocol}://${host}/api/sellers/by-slug/${encodeURIComponent(sellerSlug)}/logo`;
-  }
-  return resolveAssetUrl(req, logoUrl.replace(/^\/+/, ""));
+  // Always expose the logo through our backend public-asset route. This avoids
+  // leaking provider-specific URLs and guarantees the browser gets consistent
+  // CORS/MIME/cache behavior even when the underlying storage provider changes.
+  const storageKey = logoStorageKey || extractStorageKey(logoUrl);
+  if (storageKey) return absolutePublicAssetUrl(req, storageKey);
+
+  // Legacy rows that predate logoStorageKey are still served by the public
+  // slug endpoint, which can redirect to the original provider URL if needed.
+  const host = req.get("host");
+  if (!host) throw new HttpError(500, "آدرس عمومی Backend تنظیم نشده است.");
+  return `${req.protocol}://${host}/api/sellers/by-slug/${encodeURIComponent(sellerSlug)}/logo`;
 }
 
 function extractStorageKey(value: string): string | null {
@@ -421,6 +422,20 @@ function extractStorageKey(value: string): string | null {
   if (index >= 0) return decodeURIComponent(normalized.slice(index + marker.length));
   if (/^(products|sellers)\//.test(normalized)) return normalized.replace(/^\/+/, "");
   return null;
+}
+
+function absolutePublicAssetUrl(
+  req: { protocol: string; get(name: string): string | undefined },
+  storageKey: string,
+): string {
+  const host = req.get("host");
+  if (!host) throw new HttpError(500, "آدرس عمومی Backend تنظیم نشده است.");
+  const encoded = storageKey
+    .split("/")
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+  return `${req.protocol}://${host}/api/public/assets/${encoded}`;
 }
 
 function absolutePackageUrl(req: { protocol: string; get(name: string): string | undefined }, relative: string): string {

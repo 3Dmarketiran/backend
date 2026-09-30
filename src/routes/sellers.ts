@@ -448,14 +448,14 @@ sellersRouter.get(
 
       const seller = await prisma.seller.findUnique({
         where: { slug },
-        select: { logoUrl: true, isActive: true },
+        select: { logoUrl: true, logoStorageKey: true, isActive: true },
       });
 
       if (!seller?.isActive || !seller.logoUrl) {
         return res.status(404).end();
       }
 
-      const storageKey = extractStorageKeyFromUrl(seller.logoUrl);
+      const storageKey = seller.logoStorageKey || extractStorageKeyFromUrl(seller.logoUrl);
       if (!storageKey) {
         return res.redirect(seller.logoUrl);
       }
@@ -788,11 +788,11 @@ sellersRouter.get(
       const sellerId = assertRouteId(req.params.id, "شناسه فروشنده نامعتبر است.");
       const seller = await prisma.seller.findUnique({
         where: { id: sellerId },
-        select: { logoUrl: true },
+        select: { logoUrl: true, logoStorageKey: true },
       });
       if (!seller?.logoUrl) return res.status(404).end();
 
-      const storageKey = extractStorageKeyFromUrl(seller.logoUrl);
+      const storageKey = seller.logoStorageKey || extractStorageKeyFromUrl(seller.logoUrl);
       if (!storageKey) return res.redirect(seller.logoUrl);
 
       const buffer = await storage.read(storageKey);
@@ -874,6 +874,7 @@ sellersRouter.post(
           },
           data: {
             logoUrl: stored.url,
+            logoStorageKey: stored.storageKey,
           },
         });
 
@@ -1054,57 +1055,43 @@ function extractStorageKeyFromUrl(
     const url =
       new URL(value);
 
-    const publicBase =
-      process.env
-        .PUBLIC_ASSET_BASE_URL;
+    const publicBase = process.env.PUBLIC_ASSET_BASE_URL;
 
-    if (!publicBase) {
-      return null;
-    }
-
-    const base =
-      new URL(
-        publicBase.endsWith("/")
-          ? publicBase
-          : `${publicBase}/`
+    if (publicBase) {
+      const base = new URL(
+        publicBase.endsWith("/") ? publicBase : `${publicBase}/`
       );
-
-    if (
-      url.origin !==
-      base.origin
-    ) {
-      return null;
+      const basePath = base.pathname.endsWith("/") ? base.pathname : `${base.pathname}/`;
+      if (url.origin === base.origin && url.pathname.startsWith(basePath)) {
+        const relative = url.pathname.slice(basePath.length);
+        if (relative) {
+          return relative
+            .split("/")
+            .filter(Boolean)
+            .map((part) => decodeURIComponent(part))
+            .join("/");
+        }
+      }
     }
 
-    const basePath =
-      base.pathname.endsWith("/")
-        ? base.pathname
-        : `${base.pathname}/`;
-
-    if (
-      !url.pathname.startsWith(
-        basePath
-      )
-    ) {
-      return null;
+    // Legacy Supabase/S3 public object URLs can still be converted to their
+    // canonical storage key. This lets old seller rows be repaired without a
+    // manual re-upload of the logo.
+    const markers = [
+      "/storage/v1/object/public/",
+      "/storage/v1/object/sign/",
+    ];
+    for (const marker of markers) {
+      const index = url.pathname.indexOf(marker);
+      if (index < 0) continue;
+      const remainder = url.pathname.slice(index + marker.length);
+      const slash = remainder.indexOf("/");
+      if (slash < 0) continue;
+      const key = remainder.slice(slash + 1);
+      if (key.startsWith("sellers/")) return decodeURIComponent(key);
     }
 
-    const relative =
-      url.pathname.slice(
-        basePath.length
-      );
-
-    if (!relative) {
-      return null;
-    }
-
-    return relative
-      .split("/")
-      .filter(Boolean)
-      .map((part) =>
-        decodeURIComponent(part)
-      )
-      .join("/");
+    return null;
   } catch {
     return null;
   }

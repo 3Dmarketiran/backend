@@ -82,6 +82,8 @@ model Seller {
   storeName    String
   description  String?
   logoUrl      String?
+  // Canonical storage key for the seller logo; avoids relying on provider/CDN URLs.
+  logoStorageKey String?
   themeColor   String?
   contactEmail String?
   contactPhone String?
