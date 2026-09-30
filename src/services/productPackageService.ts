@@ -16,6 +16,12 @@ const MODEL_EXTENSIONS = new Set(["glb", "gltf", "bin", "png", "jpg", "jpeg", "w
 const cache = new Map<string, { buffer: Buffer; touchedAt: number }>();
 let cacheBytes = 0;
 
+// Product images live inside the package ZIP. Avoid reading/unzipping the same
+// large package once per thumbnail when several images are requested together.
+const imageGroupCache = new Map<string, { entries: Entry[]; touchedAt: number }>();
+const imageGroupInFlight = new Map<string, Promise<Record<PackageKind, Entry[]>>>();
+const IMAGE_GROUP_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+
 type PackageKind = "images" | "models" | "ar";
 
 type Entry = { name: string; buffer: Buffer };
@@ -272,7 +278,7 @@ export async function upsertProductPackage(params: {
   }
 
   if (existing?.storageKey && existing.storageKey !== stored.storageKey) await storage.delete(existing.storageKey).catch(() => undefined);
-  cache.clear(); cacheBytes = 0;
+  cache.clear(); cacheBytes = 0; imageGroupCache.clear(); imageGroupInFlight.clear();
   return prisma.product.findUnique({ where: { id: params.productId }, include: { images: { orderBy: { sortOrder: "asc" } }, models: true, assetPackage: true } });
 }
 
@@ -291,7 +297,19 @@ export async function removePackageAsset(productId: string, kind: PackageKind, n
   const stored = await storage.save({ folder: `products/${productId}/package`, filename: "product.zip", storageKey: key, buffer: outer, contentType: "application/zip" });
   await prisma.productAssetPackage.update({ where: { productId }, data: { storageKey: stored.storageKey, sizeBytes: stored.sizeBytes, version: pkg.version + 1 } });
   await storage.delete(pkg.storageKey).catch(() => undefined);
-  cache.clear(); cacheBytes = 0;
+  cache.clear(); cacheBytes = 0; imageGroupCache.clear(); imageGroupInFlight.clear();
+}
+
+async function getPackageGroupsCached(productId: string, pkg: { storageKey: string; version: number }): Promise<Record<PackageKind, Entry[]>> {
+  const packageKey = `${productId}:${pkg.version}`;
+  const inFlight = imageGroupInFlight.get(packageKey);
+  if (inFlight) return inFlight;
+
+  const promise = readOuterPackage(pkg.storageKey).finally(() => {
+    imageGroupInFlight.delete(packageKey);
+  });
+  imageGroupInFlight.set(packageKey, promise);
+  return promise;
 }
 
 export async function readPackageAsset(productId: string, kind: PackageKind, name: string): Promise<Buffer> {
@@ -300,7 +318,29 @@ export async function readPackageAsset(productId: string, kind: PackageKind, nam
   const cacheKey = `${productId}:${pkg.version}:${kind}:${name}`;
   const cached = cache.get(cacheKey);
   if (cached) { cached.touchedAt = Date.now(); return cached.buffer; }
-  const groups = await readOuterPackage(pkg.storageKey);
+
+  const packageKey = `${productId}:${pkg.version}`;
+  let groups: Record<PackageKind, Entry[]>;
+  const cachedImages = kind === "images" ? imageGroupCache.get(packageKey) : undefined;
+  if (cachedImages) {
+    cachedImages.touchedAt = Date.now();
+    groups = { images: cachedImages.entries, models: [], ar: [] };
+  } else {
+    groups = await getPackageGroupsCached(productId, pkg);
+    if (kind === "images") {
+      const imageBytes = groups.images.reduce((sum, item) => sum + item.buffer.length, 0);
+      if (imageBytes <= IMAGE_GROUP_CACHE_MAX_BYTES) {
+        imageGroupCache.set(packageKey, { entries: groups.images, touchedAt: Date.now() });
+        while ([...imageGroupCache.values()].reduce((sum, item) => sum + item.entries.reduce((n, e) => n + e.buffer.length, 0), 0) > IMAGE_GROUP_CACHE_MAX_BYTES && imageGroupCache.size > 1) {
+          let oldestKey: string | null = null; let oldest = Infinity;
+          for (const [k, v] of imageGroupCache) if (v.touchedAt < oldest) { oldest = v.touchedAt; oldestKey = k; }
+          if (!oldestKey) break;
+          imageGroupCache.delete(oldestKey);
+        }
+      }
+    }
+  }
+
   const entry = groups[kind].find((item) => item.name === name);
   if (!entry) throw new HttpError(404, "فایل محصول پیدا نشد.");
   cache.set(cacheKey, { buffer: entry.buffer, touchedAt: Date.now() });
