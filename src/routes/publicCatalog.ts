@@ -368,17 +368,16 @@ async function resolveCatalogAssetUrl(
   storageKey: string,
   storedUrl?: string,
 ): Promise<string> {
-  // New uploads keep the direct Supabase Storage/CDN URL in the database.
-  if (storedUrl && /^https?:\/\//i.test(storedUrl) && !/\/api\/public\//i.test(storedUrl)) {
-    return storedUrl;
-  }
-
-  // Legacy ZIP-package rows keep the Render proxy as a backwards-compatible fallback.
+  // Keep all browser-facing product media on the same-origin backend host.
+  // This avoids requiring visitors to reach Supabase directly (which may be
+  // unavailable on some networks). Storage credentials remain server-side.
+  // Legacy ZIP assets retain their existing compatibility route.
   const ref = parsePackageStorageKey(storageKey);
   if (ref) {
     return absolutePackageUrl(req, packageAssetUrl(ref.productId, ref.kind, ref.name));
   }
 
+  if (storageKey) return absolutePublicAssetUrl(req, storageKey);
   return resolveAssetUrl(req, storageKey, storedUrl);
 }
 
@@ -449,11 +448,10 @@ async function resolveAssetUrl(
   storageKey: string,
   storedUrl?: string,
 ): Promise<string> {
-  // New uploads already contain the direct Supabase Storage/CDN URL.
-  if (storedUrl && /^https?:\/\//i.test(storedUrl) && !/\/api\/public\/assets\//i.test(storedUrl)) {
-    return storedUrl;
-  }
-  return storage.getUrl(storageKey);
+  // Browser-facing files should be served through the API host, not a
+  // provider URL that may be unreachable for visitors without VPN.
+  if (storageKey) return storage.getUrl(storageKey);
+  return storedUrl || "";
 }
 
 function getAssetContentType(key: string): string {
