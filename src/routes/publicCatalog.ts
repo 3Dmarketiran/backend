@@ -378,6 +378,8 @@ async function resolveCatalogAssetUrl(
   }
 
   if (storageKey) return absolutePublicAssetUrl(req, storageKey);
+  const legacyKey = extractLegacyPublicStorageKey(storedUrl);
+  if (legacyKey) return absolutePublicAssetUrl(req, legacyKey);
   return resolveAssetUrl(req, storageKey, storedUrl);
 }
 
@@ -390,7 +392,7 @@ async function publicLogoUrl(
   // Always expose the logo through our backend public-asset route. This avoids
   // leaking provider-specific URLs and guarantees the browser gets consistent
   // CORS/MIME/cache behavior even when the underlying storage provider changes.
-  const storageKey = logoStorageKey || extractStorageKey(logoUrl);
+  const storageKey = logoStorageKey || extractStorageKey(logoUrl) || extractLegacyPublicStorageKey(logoUrl);
   if (storageKey) return absolutePublicAssetUrl(req, storageKey);
 
   // Legacy rows that predate logoStorageKey are still served by the public
@@ -398,6 +400,31 @@ async function publicLogoUrl(
   const host = req.get("host");
   if (!host) throw new HttpError(500, "آدرس عمومی Backend تنظیم نشده است.");
   return `${req.protocol}://${host}/api/sellers/by-slug/${encodeURIComponent(sellerSlug)}/logo`;
+}
+
+
+/** Convert legacy public Supabase Storage URLs to our same-origin asset proxy.
+ * Only public-object URL forms for the configured bucket are accepted.
+ */
+function extractLegacyPublicStorageKey(value?: string | null): string | null {
+  if (!value || !/^https?:\/\//i.test(value)) return null;
+  try {
+    const url = new URL(value);
+    const marker = "/storage/v1/object/public/";
+    const index = url.pathname.indexOf(marker);
+    if (index < 0) return null;
+    const remainder = url.pathname.slice(index + marker.length);
+    const slash = remainder.indexOf("/");
+    if (slash <= 0) return null;
+    const bucket = decodeURIComponent(remainder.slice(0, slash));
+    const configuredBucket = process.env.STORAGE_BUCKET;
+    if (!configuredBucket || bucket !== configuredBucket) return null;
+    const key = remainder.slice(slash + 1).split("/").map((part) => decodeURIComponent(part)).join("/");
+    if (!key || key.split("/").some((part) => part === ".." || part === ".")) return null;
+    return key;
+  } catch {
+    return null;
+  }
 }
 
 function extractStorageKey(value: string): string | null {
