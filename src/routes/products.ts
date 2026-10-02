@@ -8,7 +8,6 @@ import {
 import {
   uploadImage,
   uploadModel,
-  uploadModelZip,
   uploadProductPackage,
 } from "../middleware/upload";
 import { HttpError } from "../middleware/errorHandler";
@@ -589,54 +588,17 @@ productsRouter.post(
   }
 );
 
-// ---------------------------------------------------------------------
-// ZIP 3D / AR model upload
-// ---------------------------------------------------------------------
-
+// ZIP model uploads are intentionally disabled to avoid large in-memory
+// multipart buffers and archive extraction on the API server. Sellers must
+// upload supported model files individually (GLB, GLTF, USDZ).
 productsRouter.post(
   "/:id/models/zip",
   requireAuth,
   requireOwnProduct(),
-  uploadModelZip,
-  async (req, res, next) => {
-    try {
-      const productId =
-        assertRouteId(
-          req.params.id,
-          "شناسه محصول نامعتبر است."
-        );
-
-      if (!req.file) {
-        throw new HttpError(
-          400,
-          "فایل ZIP ارسال نشده است."
-        );
-      }
-
-      const models =
-        await assetService.addProductModelsFromZip(
-          productId,
-          req.file
-        );
-
-      await prisma.auditLog.create({
-        data: {
-          actorId: req.user!.id,
-          productId,
-          action: "PRODUCT_MODELS_ZIP_ADDED",
-          entity: "Product",
-          entityId: productId,
-          ipAddress: req.ip,
-        },
-      });
-
-      res.status(201).json({
-        models,
-        count: models.length,
-      });
-    } catch (err) {
-      next(err);
-    }
+  async (_req, res) => {
+    res.status(410).json({
+      error: "آپلود ZIP غیرفعال است. فایل‌های GLB، GLTF یا USDZ را جداگانه بارگذاری کنید.",
+    });
   }
 );
 

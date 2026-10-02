@@ -5,7 +5,6 @@ import { HttpError } from "../middleware/errorHandler";
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10MB
 const MAX_MODEL_BYTES = 50 * 1024 * 1024; // 50MB per asset
-const MAX_ZIP_BYTES = 150 * 1024 * 1024; // 150MB
 const MAX_LOGO_BYTES = 5 * 1024 * 1024; // 5MB
 
 const ALLOWED_IMAGE_MIME = new Set([
@@ -37,13 +36,6 @@ export const uploadModel = multer({
     fileSize: MAX_MODEL_BYTES,
   },
 }).single("model");
-
-export const uploadModelZip = multer({
-  storage: multer.memoryStorage(),
-  limits: {
-    fileSize: MAX_ZIP_BYTES,
-  },
-}).single("modelZip");
 
 export const uploadProductPackage = multer({
   storage: multer.memoryStorage(),
@@ -353,6 +345,5 @@ export function assertValidZip(
 export const uploadLimits = {
   image: MAX_IMAGE_BYTES,
   model: MAX_MODEL_BYTES,
-  zip: MAX_ZIP_BYTES,
   logo: MAX_LOGO_BYTES,
 };
