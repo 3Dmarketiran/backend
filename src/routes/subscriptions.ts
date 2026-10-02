@@ -678,12 +678,9 @@ const activateSchema =
       .string()
       .cuid(),
 
-    // Plan IDs may be seeded stable keys (e.g. plan-starter-90),
-    // so do not enforce Prisma's default CUID format here.
-    planId: z
-      .string()
-      .trim()
-      .min(1, "شناسه پلن الزامی است."),
+    // Plan IDs may be stable seed keys (e.g. plan-starter-90), not CUIDs.
+    // The route verifies the plan exists before creating the subscription.
+    planId: z.string().trim().min(1).max(128),
 
     startDate: z
       .string()
