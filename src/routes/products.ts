@@ -523,6 +523,16 @@ productsRouter.post(
         );
       }
 
+      const existingProduct = await productService.getProductById(productId);
+      const extension = (req.file.originalname.split(".").pop() || "").toLowerCase();
+      const existingModels = existingProduct.models || [];
+      if (extension === "usdz" && existingModels.some((item: { kind?: string }) => item.kind === "USDZ")) {
+        throw new HttpError(409, "برای این محصول از قبل فایل USDZ ثبت شده است. ابتدا فایل قبلی را حذف کنید.");
+      }
+      if (extension !== "usdz" && existingModels.some((item: { kind?: string }) => item.kind !== "USDZ")) {
+        throw new HttpError(409, "برای این محصول از قبل مدل سه‌بعدی ثبت شده است. ابتدا فایل قبلی را حذف کنید.");
+      }
+
       const model =
         await assetService.addProductModel(
           productId,
