@@ -4,8 +4,6 @@ import {
   DeleteObjectCommand,
   HeadBucketCommand,
   GetObjectCommand,
-  ListObjectsV2Command,
-  DeleteObjectsCommand,
 } from "@aws-sdk/client-s3";
 import { nanoid } from "nanoid";
 import path from "node:path";
@@ -134,39 +132,6 @@ export class S3StorageProvider implements StorageProvider {
         Key: key,
       })
     );
-  }
-
-  async deletePrefix(prefix: string): Promise<void> {
-    const normalized = prefix.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
-    const parts = normalized.split("/");
-    if (!normalized || parts.some((part) => !part || part === "." || part === ".." || !/^[a-zA-Z0-9._-]+$/.test(part))) {
-      throw new Error("Invalid storage prefix.");
-    }
-    const keyPrefix = `${normalized}/`;
-    let continuationToken: string | undefined;
-
-    do {
-      const page = await this.client.send(new ListObjectsV2Command({
-        Bucket: this.bucket,
-        Prefix: keyPrefix,
-        ContinuationToken: continuationToken,
-        MaxKeys: 1000,
-      }));
-      const objects = (page.Contents ?? []).flatMap((item) => item.Key ? [{ Key: item.Key }] : []);
-      if (objects.length) {
-        const deleted = await this.client.send(new DeleteObjectsCommand({
-          Bucket: this.bucket,
-          Delete: { Objects: objects, Quiet: false },
-        }));
-        if (deleted.Errors?.length) {
-          throw new Error(`S3 prefix deletion failed for ${deleted.Errors.length} object(s).`);
-        }
-      }
-      continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
-      if (page.IsTruncated && !continuationToken) {
-        throw new Error("S3 listing was truncated without a continuation token.");
-      }
-    } while (continuationToken);
   }
 
   async getUrl(storageKey: string): Promise<string> {

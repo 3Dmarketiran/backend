@@ -25,9 +25,6 @@ export interface StorageProvider {
 
   delete(storageKey: string): Promise<void>;
 
-  /** Delete all objects/files beneath a validated, product-scoped prefix. */
-  deletePrefix(prefix: string): Promise<void>;
-
   getUrl(storageKey: string): Promise<string>;
 
   read(storageKey: string): Promise<Buffer>;

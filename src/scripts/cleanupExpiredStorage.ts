@@ -5,20 +5,7 @@ import { purgeInactiveSellerStorage } from "../services/storageCleanupService";
 
 async function main() {
   const expired = await expireOverdueSubscriptions();
-  const purgeEnabled = process.env.ENABLE_DESTRUCTIVE_ASSET_PURGE === "true";
-  const stats = purgeEnabled
-    ? await purgeInactiveSellerStorage()
-    : {
-        sellersScanned: 0,
-        sellersPurged: 0,
-        productsPurged: 0,
-        imagesPurged: 0,
-        modelsPurged: 0,
-        logoKeysPurged: 0,
-        failures: 0,
-        skipped: true,
-        reason: "Set ENABLE_DESTRUCTIVE_ASSET_PURGE=true to allow permanent asset deletion.",
-      };
+  const stats = await purgeInactiveSellerStorage();
 
   console.log(
     JSON.stringify(
