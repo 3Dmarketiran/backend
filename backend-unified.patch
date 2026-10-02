@@ -1,0 +1,172 @@
+diff --git a/src/storage/StorageProvider.ts b/src/storage/StorageProvider.ts
+index 0000000..1111111 100644
+--- a/src/storage/StorageProvider.ts
++++ b/src/storage/StorageProvider.ts
+@@ -22,6 +22,9 @@ export interface StorageProvider {
+ 
+   delete(storageKey: string): Promise<void>;
+ 
++  /** Delete every object under a provider-safe prefix. */
++  deletePrefix(prefix: string): Promise<void>;
++
+   getUrl(storageKey: string): Promise<string>;
+ 
+   read(storageKey: string): Promise<Buffer>;
+@@ -45,0 +49,0 @@
+diff --git a/src/storage/S3StorageProvider.ts b/src/storage/S3StorageProvider.ts
+--- a/src/storage/S3StorageProvider.ts
++++ b/src/storage/S3StorageProvider.ts
+@@ -1,9 +1,11 @@
+ import {
+   S3Client,
+   PutObjectCommand,
+   DeleteObjectCommand,
++  DeleteObjectsCommand,
+   HeadBucketCommand,
+   GetObjectCommand,
++  ListObjectsV2Command,
+ } from "@aws-sdk/client-s3";
+@@ -101,6 +103,43 @@ export class S3StorageProvider implements StorageProvider {
+       })
+     );
+   }
++
++  async deletePrefix(prefix: string): Promise<void> {
++    const safePrefix = `${sanitizeStorageKey(prefix).replace(/\/+$/, "")}/`;
++    let continuationToken: string | undefined;
++
++    do {
++      const page = await this.client.send(
++        new ListObjectsV2Command({
++          Bucket: this.bucket,
++          Prefix: safePrefix,
++          ContinuationToken: continuationToken,
++          MaxKeys: 1000,
++        })
++      );
++
++      const objects = (page.Contents ?? [])
++        .map((item) => item.Key)
++        .filter((key): key is string => Boolean(key));
++
++      if (objects.length) {
++        await this.client.send(
++          new DeleteObjectsCommand({
++            Bucket: this.bucket,
++            Delete: {
++              Objects: objects.map((Key) => ({ Key })),
++              Quiet: true,
++            },
++          })
++        );
++      }
++
++      continuationToken = page.IsTruncated
++        ? page.NextContinuationToken
++        : undefined;
++    } while (continuationToken);
++  }
+ 
+   async getUrl(storageKey: string): Promise<string> {
+*** a/src/storage/LocalStorageProvider.ts b/src/storage/LocalStorageProvider.ts
+--- a/src/storage/LocalStorageProvider.ts
++++ b/src/storage/LocalStorageProvider.ts
+@@ -150,6 +150,12 @@ export class LocalStorageProvider implements StorageProvider {
+     await this.removeEmptyParentDirectories(path.dirname(target));
+   }
++
++  async deletePrefix(prefix: string): Promise<void> {
++    const safePrefix = sanitizeStorageKey(prefix).replace(/\/+$/, "");
++    const target = safeResolve(this.root, safePrefix);
++    await fs.rm(target, { recursive: true, force: true });
++  }
+ 
+   private async removeEmptyParentDirectories(startDirectory: string): Promise<void> {
+*** a/src/services/productService.ts b/src/services/productService.ts
+--- a/src/services/productService.ts
++++ b/src/services/productService.ts
+@@ -890,23 +890,15 @@ export async function deleteProduct(
+   if (!product) {
+     throw new HttpError(
+       404,
+       "محصول یافت نشد."
+     );
+   }
+ 
+   /*
+-   * Best-effort storage cleanup.
+-   * Database deletion remains authoritative.
++   * Product-scoped prefix deletion removes every current asset, including
++   * GLTF dependency files that are not represented by a DB row.
+    */
+-  await Promise.all([
+-    ...(product.assetPackage
+-      ? [storage.delete(product.assetPackage.storageKey).catch(() => undefined)]
+-      : []),
+-    ...product.images
+-      .filter((image) => !parsePackageStorageKey(image.storageKey))
+-      .map((image) => storage.delete(image.storageKey).catch(() => undefined)),
+-    ...product.models
+-      .filter((model) => !parsePackageStorageKey(model.storageKey))
+-      .map((model) => storage.delete(model.storageKey).catch(() => undefined)),
+-  ]);
++  await storage.deletePrefix(`products/${id}/`).catch(() => undefined);
++
++  if (product.assetPackage && parsePackageStorageKey(product.assetPackage.storageKey) === null) {
++    await storage.delete(product.assetPackage.storageKey).catch(() => undefined);
++  }
+ 
+   await prisma.product.delete({
+*** a/src/services/assetService.ts b/src/services/assetService.ts
+--- a/src/services/assetService.ts
++++ b/src/services/assetService.ts
+@@ -693,7 +693,25 @@ export async function deleteProductModel(
+   if (modelPackage) {
+     await removePackageAsset(productId, modelPackage.kind, modelPackage.name);
+   } else {
+-    await storage.delete(model.storageKey).catch(() => undefined);
++    const marker = `/products/${productId}/models/`;
++    const key = model.storageKey.replace(/\\/g, "/");
++    const markerIndex = key.indexOf(marker);
++    if (markerIndex >= 0) {
++      const relative = key.slice(markerIndex + marker.length);
++      const folder = relative.split("/")[0];
++      if (folder) {
++        await storage.deletePrefix(`products/${productId}/models/${folder}/`).catch(() => undefined);
++      } else {
++        await storage.delete(model.storageKey).catch(() => undefined);
++      }
++    } else {
++      await storage.delete(model.storageKey).catch(() => undefined);
++    }
+   }
+ 
+   await markUnpublishedIfNeeded(
+*** a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -8,6 +8,7 @@
+     "migrate": "prisma migrate dev --name init",
+     "migrate:deploy": "prisma migrate deploy",
+     "seed": "tsx prisma/seed.ts",
++    "maintenance:cleanup": "node dist/scripts/cleanupExpiredStorage.js",
+     "studio": "prisma studio",
+*** a/render.yaml b/render.yaml
+--- a/render.yaml
++++ b/render.yaml
+@@ -3,9 +3,17 @@ services:
+     name: threedmarketiran-backend
+     env: node
+-    rootDir: backend
++    rootDir: .
+     buildCommand: npm ci && npx prisma generate && npm run build
+     startCommand: npm start
+     healthCheckPath: /api/health/live
++
++  - type: cron
++    name: threedmarketiran-storage-cleanup
++    env: node
++    rootDir: .
++    buildCommand: npm ci && npx prisma generate && npm run build
++    schedule: "0 3 * * *"
++    startCommand: npm run maintenance:cleanup
