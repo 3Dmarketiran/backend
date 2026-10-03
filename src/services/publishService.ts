@@ -257,7 +257,7 @@ async function processPublishJob(
       }),
 
       prisma.subscriptionPlan.findMany({
-        where: { isActive: true },
+        where: { isActive: true, isPublic: true },
         include: { category: true },
         orderBy: [{ sortOrder: "asc" }, { durationDays: "asc" }],
       }),
@@ -326,6 +326,7 @@ async function processPublishJob(
         discountPct: plan.discountPct,
         productLimit: plan.productLimit,
         storageLimitMb: plan.storageLimitMb,
+        trafficLimitGb: plan.trafficLimitGb,
         categoryId: plan.categoryId,
         sortOrder: plan.sortOrder,
         features: parseJson(plan.features, {}),
@@ -343,7 +344,7 @@ async function processPublishJob(
       products,
       sellers,
       settings: settings ?? {},
-      plans: plans.map((plan) => ({ id: plan.id, name: plan.name, durationDays: plan.durationDays, price: plan.price, discountPct: plan.discountPct, productLimit: plan.productLimit, storageLimitMb: plan.storageLimitMb, categoryId: plan.categoryId, sortOrder: plan.sortOrder, features: parseJson(plan.features, {}) })),
+      plans: plans.map((plan) => ({ id: plan.id, name: plan.name, durationDays: plan.durationDays, price: plan.price, discountPct: plan.discountPct, productLimit: plan.productLimit, storageLimitMb: plan.storageLimitMb, trafficLimitGb: plan.trafficLimitGb, categoryId: plan.categoryId, sortOrder: plan.sortOrder, features: parseJson(plan.features, {}) })),
       planCategories: planCategories.map((category) => ({ id: category.id, name: category.name, slug: category.slug, description: category.description, sortOrder: category.sortOrder, isActive: category.isActive })),
     };
 

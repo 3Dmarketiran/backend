@@ -11,6 +11,7 @@ import {
   parseJson,
   serializeJson,
 } from "../utils/json";
+import { pricingFloorForTraffic } from "../services/trafficService";
 
 export const subscriptionsRouter =
   Router();
@@ -114,7 +115,7 @@ subscriptionsRouter.get(
         where: adminView && req.query.includeInactive === "true" ? {} : { isActive: true },
         include: {
           plans: {
-            where: adminView && req.query.includeInactive === "true" ? {} : { isActive: true },
+            where: adminView && req.query.includeInactive === "true" ? {} : { isActive: true, isPublic: true },
             orderBy: [{ sortOrder: "asc" }, { durationDays: "asc" }, { createdAt: "asc" }],
           },
         },
@@ -196,10 +197,11 @@ subscriptionsRouter.put(
 
 subscriptionsRouter.get(
   "/plans",
-  async (_req, res, next) => {
+  async (req, res, next) => {
     try {
+      const adminView = Boolean(req.user && (req.user.role === "ADMIN" || req.user.role === "SUPER_ADMIN"));
       const plans = await prisma.subscriptionPlan.findMany({
-        where: { isActive: true },
+        where: adminView ? {} : { isActive: true, isPublic: true },
         include: { category: true },
         orderBy: [{ sortOrder: "asc" }, { durationDays: "asc" }],
       });
@@ -211,6 +213,15 @@ subscriptionsRouter.get(
     } catch (err) { next(err); }
   }
 );
+
+function assertPlanEconomicFloor(trafficLimitGb: number | null | undefined, durationDays: number, price: number) {
+  if (trafficLimitGb != null) {
+    const floor = pricingFloorForTraffic(trafficLimitGb, durationDays);
+    if (price < floor) {
+      throw new HttpError(409, `قیمت پلن باید حداقل ${floor.toLocaleString("fa-IR")} تومان باشد تا هزینه محافظتی ترافیک و هزینه ثابت مدل پوشش داده شود.`);
+    }
+  }
+}
 
 const planSchema =
   z.object({
@@ -253,10 +264,21 @@ const planSchema =
       .nullable()
       .optional(),
 
+    trafficLimitGb: z
+      .number()
+      .int()
+      .positive()
+      .nullable()
+      .optional(),
+
     categoryId: z.string().trim().min(1).nullable().optional(),
     sortOrder: z.number().int().min(0).optional(),
 
     isActive: z
+      .boolean()
+      .optional(),
+
+    isPublic: z
       .boolean()
       .optional(),
   });
@@ -275,6 +297,8 @@ subscriptionsRouter.post(
         planSchema.parse(
           req.body
         );
+
+      assertPlanEconomicFloor(input.trafficLimitGb, input.durationDays, input.price);
 
       const plan =
         await prisma.subscriptionPlan.create(
@@ -297,6 +321,9 @@ subscriptionsRouter.post(
               storageLimitMb:
                 input.storageLimitMb ??
                 null,
+              trafficLimitGb:
+                input.trafficLimitGb ??
+                null,
               categoryId:
                 input.categoryId ??
                 null,
@@ -305,6 +332,9 @@ subscriptionsRouter.post(
                 0,
               isActive:
                 input.isActive ??
+                true,
+              isPublic:
+                input.isPublic ??
                 true,
             },
           }
@@ -376,6 +406,12 @@ subscriptionsRouter.put(
         );
       }
 
+      assertPlanEconomicFloor(
+        input.trafficLimitGb !== undefined ? input.trafficLimitGb : existing.trafficLimitGb,
+        input.durationDays !== undefined ? input.durationDays : existing.durationDays,
+        input.price !== undefined ? input.price : existing.price,
+      );
+
       const plan =
         await prisma.subscriptionPlan.update(
           {
@@ -432,6 +468,14 @@ subscriptionsRouter.put(
                   }
                 : {}),
 
+              ...(input.trafficLimitGb !==
+              undefined
+                ? {
+                    trafficLimitGb:
+                      input.trafficLimitGb,
+                  }
+                : {}),
+
               ...(input.categoryId !==
               undefined
                 ? {
@@ -463,6 +507,14 @@ subscriptionsRouter.put(
                 ? {
                     isActive:
                       input.isActive,
+                  }
+                : {}),
+
+              ...(input.isPublic !==
+              undefined
+                ? {
+                    isPublic:
+                      input.isPublic,
                   }
                 : {}),
             },
@@ -678,9 +730,9 @@ const activateSchema =
       .string()
       .cuid(),
 
-    // Plan IDs may be stable seed keys (e.g. plan-starter-90), not CUIDs.
-    // The route verifies the plan exists before creating the subscription.
-    planId: z.string().trim().min(1).max(128),
+    planId: z
+      .string()
+      .cuid(),
 
     startDate: z
       .string()

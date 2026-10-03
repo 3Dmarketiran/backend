@@ -30,45 +30,24 @@ export const uploadImage = multer({
   },
 }).single("image");
 
-const modelUpload = multer({
+export const uploadModel = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: MAX_MODEL_BYTES, files: 1 },
+  limits: {
+    fileSize: MAX_MODEL_BYTES,
+  },
 }).single("model");
 
-function uploadError(err: unknown, next: NextFunction, label: string): void {
-  if (err instanceof multer.MulterError) {
-    if (err.code === "LIMIT_FILE_SIZE") {
-      next(new HttpError(413, `حجم فایل ${label} نباید بیشتر از ۵۰ مگابایت باشد.`));
-      return;
-    }
-    next(new HttpError(400, `تعداد یا ساختار فایل‌های ${label} نامعتبر است.`));
-    return;
-  }
-  next(err);
-}
-
-export const uploadModel = (req: Request, res: Response, next: NextFunction): void => {
-  modelUpload(req, res, (err: unknown) => {
-    if (err) return uploadError(err, next, "مدل سه‌بعدی");
-    next();
-  });
-};
-
-const packageUpload = multer({
+export const uploadProductPackage = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: MAX_MODEL_BYTES, files: 7 },
+  limits: {
+    fileSize: MAX_MODEL_BYTES,
+    files: 35,
+  },
 }).fields([
-  { name: "images", maxCount: 5 },
-  { name: "models", maxCount: 1 },
-  { name: "ar", maxCount: 1 },
+  { name: "images", maxCount: 20 },
+  { name: "models", maxCount: 10 },
+  { name: "ar", maxCount: 5 },
 ]);
-
-export const uploadProductPackage = (req: Request, res: Response, next: NextFunction): void => {
-  packageUpload(req, res, (err: unknown) => {
-    if (err) return uploadError(err, next, "بسته محصول");
-    next();
-  });
-};
 
 // Logo upload middleware.
 //

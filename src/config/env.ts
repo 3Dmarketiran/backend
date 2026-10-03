@@ -146,6 +146,36 @@ const envSchema = z
       .int()
       .positive()
       .default(10),
+
+    // Economic guardrails used by traffic quota and pricing validation.
+    // These are conservative planning assumptions, not a provider invoice.
+    TRAFFIC_COST_PER_GB_TOMAN: z
+      .coerce
+      .number()
+      .int()
+      .nonnegative()
+      .default(23400),
+
+    TRAFFIC_FIXED_COST_TOMAN: z
+      .coerce
+      .number()
+      .int()
+      .nonnegative()
+      .default(83200),
+
+    TRAFFIC_MIN_PRICE_MARGIN_PCT: z
+      .coerce
+      .number()
+      .min(0)
+      .max(500)
+      .default(20),
+
+    TRAFFIC_BUNDLE_MIN_MARGIN_PCT: z
+      .coerce
+      .number()
+      .min(0)
+      .max(500)
+      .default(25),
   })
   .superRefine((value, ctx) => {
     const isProduction =

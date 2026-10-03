@@ -100,9 +100,13 @@ async function optimizeImage(file: Express.Multer.File): Promise<{ name: string;
   if (file.buffer.length > MAX_IMAGE_BYTES) throw new HttpError(413, "حجم تصویر نباید بیشتر از 10MB باشد.");
   await assertValidImage(file.buffer);
   try {
-    const result = await sharp(file.buffer)
+    // Normalize newly uploaded product photos to a bounded delivery size.
+    // This reduces storage and public egress while preserving enough detail
+    // for the marketplace product gallery. Existing stored assets are untouched.
+    const result = await sharp(file.buffer, { limitInputPixels: 40_000_000 })
       .rotate()
-      .webp({ quality: 88, effort: 4 })
+      .resize({ width: 1600, height: 1600, fit: "inside", withoutEnlargement: true })
+      .webp({ quality: 82, effort: 5, smartSubsample: true })
       .toBuffer({ resolveWithObject: true });
     return {
       name: `${safeName(file.originalname, "image").replace(/\.[^.]+$/, "")}.webp`,

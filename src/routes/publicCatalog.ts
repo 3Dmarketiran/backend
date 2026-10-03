@@ -4,6 +4,7 @@ import { parseJson } from "../utils/json";
 import { storage } from "../storage";
 import { HttpError } from "../middleware/errorHandler";
 import { readPackageAsset, getPackageContentType, parsePackageStorageKey, packageAssetUrl } from "../services/productPackageService";
+import { reserveTrafficOrThrow } from "../services/trafficService";
 
 export const publicCatalogRouter = Router();
 
@@ -29,16 +30,28 @@ publicCatalogRouter.get("/package/:productId/:kind/*", async (req, res, next) =>
     const now = new Date();
     const product = await prisma.product.findFirst({
       where: { id: productId, visibility: "PUBLISHED", hasUnpublishedChanges: false, seller: { isActive: true, subscriptions: { some: { status: "ACTIVE", startDate: { lte: now }, endDate: { gte: now }, plan: { is: { isActive: true } } } } } },
-      select: { id: true },
+      select: { id: true, sellerId: true, assetPackage: { select: { storageKey: true } } },
     });
-    if (!product) throw new HttpError(404, "فایل محصول منتشرشده پیدا نشد.");
-    const buffer = await readPackageAsset(productId, kind, name);
-    res.setHeader("Content-Type", getPackageContentType(name));
-    res.setHeader("Content-Length", String(buffer.byteLength));
-    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
-    res.send(buffer);
+    if (!product || !product.assetPackage?.storageKey || !product.assetPackage.storageKey.startsWith("package:")) {
+      throw new HttpError(404, "فایل محصول منتشرشده پیدا نشد.");
+    }
+    // Legacy packages are whole ZIP objects. The storage provider egress can
+    // be charged for reading the outer ZIP even when only one inner file is
+    // returned, so reserve the complete package size BEFORE reading it.
+    const packageSizeBytes = await storage.getSize(product.assetPackage.storageKey);
+    const releaseTraffic = await reserveTrafficOrThrow(product.sellerId, packageSizeBytes);
+    try {
+      const buffer = await readPackageAsset(productId, kind, name);
+      res.setHeader("Content-Type", getPackageContentType(name));
+      res.setHeader("Content-Length", String(buffer.byteLength));
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+      res.send(buffer);
+    } catch (sendError) {
+      await releaseTraffic();
+      throw sendError;
+    }
   } catch (error) { next(error); }
 });
 
@@ -80,7 +93,7 @@ publicCatalogRouter.get("/assets/*", async (req, res, next) => {
             },
           },
         },
-        select: { id: true },
+        select: { id: true, sellerId: true },
       });
 
       if (!product) {
@@ -114,15 +127,30 @@ publicCatalogRouter.get("/assets/*", async (req, res, next) => {
       throw new HttpError(404, "فایل عمومی پیدا نشد.");
     }
 
-    const buffer = await storage.read(key);
-    const contentType = getAssetContentType(key);
+    let trafficSellerId: string | null = null;
+    if (resource === "products") {
+      const productOwner = await prisma.product.findUnique({ where: { id: resourceId }, select: { sellerId: true } });
+      trafficSellerId = productOwner?.sellerId ?? null;
+    } else if (resource === "sellers") {
+      trafficSellerId = resourceId;
+    }
+    if (!trafficSellerId) throw new HttpError(404, "مالک فایل پیدا نشد.");
 
-    res.setHeader("Content-Type", contentType);
-    res.setHeader("Content-Length", String(buffer.byteLength));
-    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
-    res.send(buffer);
+    const sizeBytes = await storage.getSize(key);
+    const releaseTraffic = await reserveTrafficOrThrow(trafficSellerId, sizeBytes);
+    try {
+      const buffer = await storage.read(key);
+      const contentType = getAssetContentType(key);
+      res.setHeader("Content-Type", contentType);
+      res.setHeader("Content-Length", String(buffer.byteLength));
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+      res.send(buffer);
+    } catch (sendError) {
+      await releaseTraffic();
+      throw sendError;
+    }
   } catch (error) {
     next(error);
   }
@@ -251,7 +279,7 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
       }),
       prisma.platformSetting.findUnique({ where: { id: "singleton" } }),
       prisma.subscriptionPlan.findMany({
-        where: { isActive: true },
+        where: { isActive: true, isPublic: true },
         include: { category: true },
         orderBy: [{ sortOrder: "asc" }, { durationDays: "asc" }],
       }),
@@ -344,6 +372,7 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
         discountPct: plan.discountPct,
         productLimit: plan.productLimit,
         storageLimitMb: plan.storageLimitMb,
+        trafficLimitGb: plan.trafficLimitGb,
         features: parseJson(plan.features, {}),
         categoryId: plan.categoryId,
         sortOrder: plan.sortOrder,

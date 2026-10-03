@@ -39,6 +39,7 @@ model User {
   sessions        Session[]
   auditLogsActor  AuditLog[]         @relation("AuditActor")
   subscriptionsBy Subscription[]     @relation("ActivatedByAdmin")
+  approvedTrafficPurchases TrafficPurchase[] @relation("TrafficPurchaseApprovedBy")
   publishJobs     PublishJob[]       @relation("TriggeredByUser")
   loginAttempts   LoginAttempt[]
 
@@ -255,10 +256,13 @@ model SubscriptionPlan {
   features      String?
   productLimit  Int?
   storageLimitMb Int?
+  // Monthly public data-transfer allowance in GB. Null means unlimited.
+  trafficLimitGb Int?
   categoryId    String?
   category      SubscriptionPlanCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   sortOrder     Int      @default(0)
   isActive      Boolean  @default(true)
+  isPublic      Boolean  @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -295,6 +299,60 @@ model Subscription {
 // ----------------------------------------------------------------
 // Publishing pipeline
 // ----------------------------------------------------------------
+
+model TrafficBundle {
+  id         String   @id @default(cuid())
+  name       String
+  gigabytes  Int
+  priceToman Int
+  sortOrder  Int      @default(0)
+  isActive   Boolean  @default(true)
+
+  purchases TrafficPurchase[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive, sortOrder])
+}
+
+model TrafficUsage {
+  id          String   @id @default(cuid())
+  sellerId    String
+  seller      Seller   @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  periodStart DateTime
+  periodEnd   DateTime
+  servedBytes BigInt   @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([sellerId, periodStart])
+  @@index([sellerId, periodEnd])
+}
+
+model TrafficPurchase {
+  id               String        @id @default(cuid())
+  sellerId         String
+  seller           Seller        @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  bundleId         String
+  bundle           TrafficBundle @relation(fields: [bundleId], references: [id])
+  periodStart      DateTime
+  periodEnd        DateTime
+  gigabytes        Int
+  priceToman       Int
+  status           String        @default("PENDING")
+  paymentReference String?
+  notes            String?
+  requestedAt      DateTime      @default(now())
+  approvedAt       DateTime?
+  approvedById     String?
+  approvedBy       User?         @relation("TrafficPurchaseApprovedBy", fields: [approvedById], references: [id])
+  rejectedAt       DateTime?
+
+  @@index([sellerId, periodStart, status])
+  @@index([status, requestedAt])
+}
 
 model PublishJob {
   id          String   @id @default(cuid())

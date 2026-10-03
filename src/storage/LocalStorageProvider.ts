@@ -186,22 +186,6 @@ export class LocalStorageProvider implements StorageProvider {
     await this.removeEmptyParentDirectories(path.dirname(target));
   }
 
-  async deletePrefix(prefix: string): Promise<void> {
-    const normalized = normalizeSlashes(prefix).replace(/^\/+|\/+$/g, "");
-    if (!normalized || normalized.split("/").some((part) => !part || part === "." || part === ".." || !SAFE_SEGMENT.test(part))) {
-      throw new Error("Invalid storage prefix.");
-    }
-
-    const target = safeResolve(this.root, normalized);
-    const root = path.resolve(this.root);
-    if (target === root || !target.startsWith(`${root}${path.sep}`)) {
-      throw new Error("Storage prefix must target a child directory.");
-    }
-
-    await fs.rm(target, { recursive: true, force: true });
-    await this.removeEmptyParentDirectories(path.dirname(target));
-  }
-
   private async removeEmptyParentDirectories(startDirectory: string): Promise<void> {
     const root = path.resolve(this.root);
     let current = path.resolve(startDirectory);
@@ -252,6 +236,13 @@ export class LocalStorageProvider implements StorageProvider {
     const target = safeResolve(this.root, safeKey);
 
     return fs.readFile(target);
+  }
+
+  async getSize(storageKey: string): Promise<number> {
+    const safeKey = sanitizeStorageKey(storageKey);
+    const target = safeResolve(this.root, safeKey);
+    const stat = await fs.stat(target);
+    return stat.size;
   }
 
   async healthCheck(): Promise<{

@@ -16,6 +16,7 @@ import {
 } from "../utils/json";
 import { storage } from "../storage";
 import { republishForSeller } from "../services/publishService";
+import { reserveTrafficOrThrow } from "../services/trafficService";
 
 export const sellersRouter = Router();
 
@@ -457,9 +458,12 @@ sellersRouter.get(
 
       const storageKey = seller.logoStorageKey || extractStorageKeyFromUrl(seller.logoUrl);
       if (!storageKey) {
-        return res.redirect(seller.logoUrl);
+        throw new HttpError(503, "لوگوی این فروشگاه هنوز به ذخیره‌سازی داخلی منتقل نشده است.");
       }
 
+      const sizeBytes = await storage.getSize(storageKey);
+      const releaseTraffic = await reserveTrafficOrThrow(seller.id, sizeBytes);
+      let sent = false;
       const buffer = await storage.read(storageKey);
       const extension = storageKey.split(".").pop()?.toLowerCase();
       const contentTypes: Record<string, string> = {
@@ -473,7 +477,13 @@ sellersRouter.get(
 
       res.setHeader("Content-Type", contentTypes[extension || ""] || "application/octet-stream");
       res.setHeader("Cache-Control", "public, max-age=300, s-maxage=300");
-      return res.send(buffer);
+      try {
+        res.send(buffer);
+        sent = true;
+      } finally {
+        if (!sent) await releaseTraffic();
+      }
+      return undefined;
     } catch (err) {
       next(err);
     }

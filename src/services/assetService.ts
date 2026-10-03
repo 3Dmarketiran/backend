@@ -167,11 +167,13 @@ async function convertImageToWebP(
   height?: number;
 }> {
   try {
-    const result = await sharp(buffer)
+    const result = await sharp(buffer, { limitInputPixels: 40_000_000 })
       .rotate()
+      .resize({ width: 1600, height: 1600, fit: "inside", withoutEnlargement: true })
       .webp({
-        quality: 88,
-        effort: 4,
+        quality: 82,
+        effort: 5,
+        smartSubsample: true,
       })
       .toBuffer({
         resolveWithObject: true,

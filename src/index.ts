@@ -26,6 +26,7 @@ import { analyticsRouter } from "./routes/analytics";
 import { adminSettingsRouter } from "./routes/adminSettings";
 import { publishingRouter, mountPublishingOnProducts } from "./routes/publishing";
 import { publicCatalogRouter } from "./routes/publicCatalog";
+import { trafficRouter } from "./routes/traffic";
 
 import { expireOverdueSubscriptions } from "./routes/subscriptions";
 
@@ -179,6 +180,7 @@ app.use(
     "/api/subscriptions",
     "/api/publishing",
     "/api/admin",
+    "/api/traffic",
   ],
   sensitiveApiLimiter,
 );
@@ -223,6 +225,7 @@ app.use("/api/products", productsRouter);
 app.use("/api/sellers", sellersRouter);
 app.use("/api/subscriptions", subscriptionsRouter);
 app.use("/api/analytics", analyticsRouter);
+app.use("/api/traffic", trafficRouter);
 app.use("/api/admin", adminSettingsRouter);
 app.use("/api/publishing", publishingRouter);
 
