@@ -555,6 +555,44 @@ const updateSellerSchema =
       .optional(),
   });
 
+
+// Admin-only permanent seller removal. Storage objects are removed first; if any
+// object deletion fails, database records are preserved so cleanup can be retried.
+sellersRouter.delete(
+  "/:id",
+  requireAuth,
+  requireAdmin,
+  async (req, res, next) => {
+    try {
+      const sellerId = assertRouteId(req.params.id, "شناسه فروشنده نامعتبر است.");
+      const seller = await prisma.seller.findUnique({
+        where: { id: sellerId },
+        include: {
+          products: { include: { images: true, models: true, assetPackage: true } },
+        },
+      });
+      if (!seller) throw new HttpError(404, "فروشنده یافت نشد.");
+      const keys = new Set<string>();
+      if (seller.logoStorageKey) keys.add(seller.logoStorageKey);
+      for (const product of seller.products) {
+        for (const image of product.images) if (image.storageKey) keys.add(image.storageKey);
+        for (const model of product.models) if (model.storageKey) keys.add(model.storageKey);
+        if (product.assetPackage?.storageKey) keys.add(product.assetPackage.storageKey);
+      }
+      const failures: string[] = [];
+      for (const key of keys) {
+        try { await storage.delete(key); }
+        catch { failures.push(key); }
+      }
+      if (failures.length) {
+        throw new HttpError(502, `حذف فایل‌های فروشگاه کامل نشد؛ اطلاعات پایگاه داده حفظ شد. تعداد فایل ناموفق: ${failures.length}`);
+      }
+      await prisma.seller.delete({ where: { id: sellerId } });
+      res.json({ success: true, deletedFiles: keys.size });
+    } catch (error) { next(error); }
+  }
+);
+
 sellersRouter.put(
   "/:id",
   requireAuth,
