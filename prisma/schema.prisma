@@ -98,11 +98,13 @@ model Seller {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  products        Product[]
-  subscriptions   Subscription[]
-  publishJobs     PublishJob[]
-  analyticsEvents AnalyticsEvent[]
-  auditLogs       AuditLog[]       @relation("AuditSeller")
+  products         Product[]
+  subscriptions    Subscription[]
+  publishJobs      PublishJob[]
+  analyticsEvents  AnalyticsEvent[]
+  trafficUsages    TrafficUsage[]
+  trafficPurchases TrafficPurchase[]
+  auditLogs        AuditLog[]       @relation("AuditSeller")
 
   @@index([slug])
   @@index([sellerCategoryId])
