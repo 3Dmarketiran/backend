@@ -25,8 +25,6 @@ async function main() {
     create: { id: "subscription-category-general", name: "پلن‌های عمومی", slug: "general", description: "پلن‌های عمومی فروشندگان", sortOrder: 0 },
   });
 
-  await prisma.subscriptionPlan.updateMany({ data: { isPublic: false } });
-
   const planDefs = [
     { name: "Starter", durationDays: 30, price: 1290000, discountPct: 0, productLimit: 10, storageLimitMb: 500, trafficLimitGb: 5, sortOrder: 10, isPublic: true },
     { name: "Starter · ۳ ماهه", durationDays: 90, price: 3676500, discountPct: 5, productLimit: 10, storageLimitMb: 500, trafficLimitGb: 5, sortOrder: 11, isPublic: true },
@@ -50,8 +48,35 @@ async function main() {
     { id: "traffic-10gb", name: "بسته ۱۰ گیگابایت", gigabytes: 10, priceToman: 499000, sortOrder: 30 },
     { id: "traffic-25gb", name: "بسته ۲۵ گیگابایت", gigabytes: 25, priceToman: 1199000, sortOrder: 40 },
   ];
+  for (const plan of planDefs) {
+    const id = `final-${plan.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}-${plan.durationDays}`;
+    const existingPlan = await prisma.subscriptionPlan.findUnique({ where: { id } });
+    if (!existingPlan) {
+      await prisma.subscriptionPlan.create({
+        data: {
+          id,
+          name: plan.name,
+          durationDays: plan.durationDays,
+          price: plan.price,
+          discountPct: plan.discountPct,
+          productLimit: plan.productLimit,
+          storageLimitMb: plan.storageLimitMb,
+          trafficLimitGb: plan.trafficLimitGb,
+          sortOrder: plan.sortOrder,
+          isPublic: plan.isPublic,
+          isActive: true,
+          categoryId: defaultPlanCategory.id,
+          features: "{}",
+        },
+      });
+    }
+  }
+
   for (const bundle of bundleDefs) {
-    await prisma.trafficBundle.upsert({ where: { id: bundle.id }, update: { ...bundle, isActive: true }, create: { ...bundle, isActive: true } });
+    const existingBundle = await prisma.trafficBundle.findUnique({ where: { id: bundle.id } });
+    if (!existingBundle) {
+      await prisma.trafficBundle.create({ data: { ...bundle, isActive: true } });
+    }
   }
 
   await prisma.subscriptionPlan.updateMany({
