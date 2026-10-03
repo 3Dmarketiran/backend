@@ -16,7 +16,10 @@ import { assertValidImage, assertValidModel } from "../middleware/upload";
  */
 const MAX_ASSET_BYTES = 50 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
-const MAX_PACKAGE_FILES = 35;
+const MAX_PACKAGE_FILES = 7;
+const MAX_PRODUCT_IMAGES = 5;
+const MAX_PRODUCT_3D_MODELS = 1;
+const MAX_PRODUCT_USDZ_MODELS = 1;
 
 const MODEL_EXTENSIONS = new Set(["glb", "gltf", "bin", "png", "jpg", "jpeg", "webp", "ktx2", "basis", "hdr", "exr", "bmp", "tga", "gif"]);
 const MODEL_ROOT_EXTENSIONS = new Set(["glb", "gltf", "usdz"]);
@@ -138,6 +141,18 @@ export async function upsertProductPackage(params: {
   const allFiles = [...(params.images || []), ...(params.models || []), ...(params.ar || [])];
   if (!allFiles.length) throw new HttpError(400, "هیچ فایل معتبری برای بسته ارسال نشده است.");
   if (allFiles.length > MAX_PACKAGE_FILES) throw new HttpError(400, `حداکثر ${MAX_PACKAGE_FILES} فایل در هر بسته مجاز است.`);
+  if ((params.images?.length ?? 0) > MAX_PRODUCT_IMAGES) throw new HttpError(400, "حداکثر ۵ تصویر برای هر محصول مجاز است.");
+  if ((params.models?.length ?? 0) > MAX_PRODUCT_3D_MODELS) throw new HttpError(400, "حداکثر یک فایل GLB/GLTF برای هر محصول مجاز است.");
+  if ((params.ar?.length ?? 0) > MAX_PRODUCT_USDZ_MODELS) throw new HttpError(400, "حداکثر یک فایل USDZ برای هر محصول مجاز است.");
+
+  const [existingImages, existing3D, existingUsdz] = await prisma.$transaction([
+    prisma.productImage.count({ where: { productId: params.productId } }),
+    prisma.productModel.count({ where: { productId: params.productId, kind: { in: ["GLB", "GLTF"] } } }),
+    prisma.productModel.count({ where: { productId: params.productId, kind: "USDZ" } }),
+  ]);
+  if (existingImages + (params.images?.length ?? 0) > MAX_PRODUCT_IMAGES) throw new HttpError(409, "این محصول با تصاویر جدید از سقف ۵ تصویر عبور می‌کند.");
+  if (existing3D + (params.models?.length ?? 0) > MAX_PRODUCT_3D_MODELS) throw new HttpError(409, "این محصول فقط یک فایل GLB/GLTF می‌پذیرد.");
+  if (existingUsdz + (params.ar?.length ?? 0) > MAX_PRODUCT_USDZ_MODELS) throw new HttpError(409, "این محصول فقط یک فایل USDZ می‌پذیرد.");
 
   const preparedImages: Array<{ file: Express.Multer.File; optimized: Awaited<ReturnType<typeof optimizeImage>> }> = [];
   for (const file of params.images || []) {
@@ -149,6 +164,7 @@ export async function upsertProductPackage(params: {
     if (!file?.buffer?.length) throw new HttpError(400, "فایل مدل خالی است.");
     if (file.buffer.length > MAX_ASSET_BYTES) throw new HttpError(413, "حجم هر فایل مدل نباید بیشتر از 50MB باشد.");
     const ext = extension(file.originalname);
+    if (ext === "usdz") throw new HttpError(400, "USDZ باید فقط در بخش واقعیت افزوده ارسال شود.");
     if (!MODEL_EXTENSIONS.has(ext) || !isRootModel(file.originalname)) {
       throw new HttpError(400, "فرمت مدل مجاز نیست. GLB، GLTF و USDZ پشتیبانی می‌شوند.");
     }

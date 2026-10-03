@@ -217,6 +217,11 @@ export async function addProductImage(
     converted.buffer.length
   );
 
+  const existingImageCount = await prisma.productImage.count({ where: { productId } });
+  if (existingImageCount >= 5) {
+    throw new HttpError(409, "حداکثر ۵ تصویر برای هر محصول مجاز است. ابتدا یکی از تصاویر را حذف کنید.");
+  }
+
   const stored =
     await storage.save({
       folder: `products/${productId}/images`,
@@ -461,6 +466,19 @@ export async function addProductModel(
     productId,
     file.buffer.length
   );
+
+  const existingModels = await prisma.productModel.findMany({
+    where: { productId },
+    select: { kind: true },
+  });
+  const hasSameSlot = kind === "USDZ"
+    ? existingModels.some((model) => model.kind === "USDZ")
+    : existingModels.some((model) => model.kind === "GLB" || model.kind === "GLTF");
+  if (hasSameSlot) {
+    throw new HttpError(409, kind === "USDZ"
+      ? "حداکثر یک فایل USDZ برای هر محصول مجاز است. ابتدا فایل USDZ قبلی را حذف کنید."
+      : "حداکثر یک فایل GLB/GLTF برای هر محصول مجاز است. ابتدا فایل سه‌بعدی قبلی را حذف کنید.");
+  }
 
   const stored =
     await storage.save({

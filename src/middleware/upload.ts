@@ -44,9 +44,9 @@ export const uploadProductPackage = multer({
     files: 35,
   },
 }).fields([
-  { name: "images", maxCount: 20 },
-  { name: "models", maxCount: 10 },
-  { name: "ar", maxCount: 5 },
+  { name: "images", maxCount: 5 },
+  { name: "models", maxCount: 1 },
+  { name: "ar", maxCount: 1 },
 ]);
 
 // Logo upload middleware.
