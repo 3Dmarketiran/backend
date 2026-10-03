@@ -5,6 +5,8 @@ import {
   HeadBucketCommand,
   HeadObjectCommand,
   GetObjectCommand,
+  ListObjectsV2Command,
+  DeleteObjectsCommand,
 } from "@aws-sdk/client-s3";
 import { nanoid } from "nanoid";
 import path from "node:path";
@@ -133,6 +135,31 @@ export class S3StorageProvider implements StorageProvider {
         Key: key,
       })
     );
+  }
+
+  async deletePrefix(prefix: string): Promise<void> {
+    const normalized = sanitizeStorageKey(prefix);
+    if (!normalized) throw new Error("Storage prefix is required.");
+    const keyPrefix = `${normalized}/`;
+    let continuationToken: string | undefined;
+
+    do {
+      const page = await this.client.send(new ListObjectsV2Command({
+        Bucket: this.bucket,
+        Prefix: keyPrefix,
+        ContinuationToken: continuationToken,
+      }));
+      const keys = (page.Contents || [])
+        .map((item) => item.Key)
+        .filter((key): key is string => Boolean(key));
+      if (keys.length) {
+        await this.client.send(new DeleteObjectsCommand({
+          Bucket: this.bucket,
+          Delete: { Objects: keys.map((Key) => ({ Key })), Quiet: true },
+        }));
+      }
+      continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
+    } while (continuationToken);
   }
 
   async getUrl(storageKey: string): Promise<string> {

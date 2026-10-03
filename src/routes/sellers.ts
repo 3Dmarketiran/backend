@@ -449,7 +449,7 @@ sellersRouter.get(
 
       const seller = await prisma.seller.findUnique({
         where: { slug },
-        select: { logoUrl: true, logoStorageKey: true, isActive: true },
+        select: { id: true, logoUrl: true, logoStorageKey: true, isActive: true },
       });
 
       if (!seller?.isActive || !seller.logoUrl) {

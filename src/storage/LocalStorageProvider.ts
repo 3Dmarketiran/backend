@@ -217,6 +217,17 @@ export class LocalStorageProvider implements StorageProvider {
     }
   }
 
+  async deletePrefix(prefix: string): Promise<void> {
+    const safePrefix = sanitizeStorageKey(prefix);
+    const target = safeResolve(this.root, safePrefix);
+    try {
+      await fs.rm(target, { recursive: true, force: true });
+    } catch (error) {
+      throw error;
+    }
+    await this.removeEmptyParentDirectories(path.dirname(target));
+  }
+
   async getUrl(storageKey: string): Promise<string> {
     const safeKey = sanitizeStorageKey(storageKey);
 
