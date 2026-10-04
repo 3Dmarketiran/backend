@@ -277,6 +277,9 @@ async function processPublishJob(
     // Never report a successful publish if the requested product was filtered
     // out of the public snapshot. This turns a silent storefront disappearance
     // into an actionable failed job instead of a misleading success state.
+    // Use one timestamp for subscription eligibility checks in this publish job.
+    const now = new Date();
+
     const requestedJob = await prisma.publishJob.findUnique({
       where: { id: jobId },
       select: { productId: true },
