@@ -215,9 +215,8 @@ async function log(
 async function processPublishJob(
   jobId: string
 ) {
-  const startedAt =
-    new Date();
-
+  const startedAt = new Date();
+  const now = new Date();
   try {
     await prisma.publishJob.update({
       where: {
