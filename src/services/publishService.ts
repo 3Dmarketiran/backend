@@ -1,3 +1,4 @@
+import { env } from "../config/env";
 import { prisma } from "../config/prisma";
 import {
   upsertFile,
@@ -215,8 +216,9 @@ async function log(
 async function processPublishJob(
   jobId: string
 ) {
-  const startedAt = new Date();
-  const now = new Date();
+  const startedAt =
+    new Date();
+
   try {
     await prisma.publishJob.update({
       where: {
@@ -975,7 +977,8 @@ function publicAssetProxyUrl(storageKey: string): string {
     .filter(Boolean)
     .map((part) => encodeURIComponent(part))
     .join("/");
-  return `/api/public/assets/${encoded}`;
+  const apiBase = (env.API_URL || "http://localhost:4000").replace(/\/+$/, "");
+  return `${apiBase}/api/public/assets/${encoded}`;
 }
 
 
