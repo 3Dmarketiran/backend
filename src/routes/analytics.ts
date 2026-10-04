@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../config/prisma";
 import { requireAuth } from "../middleware/auth";
+import { HttpError } from "../middleware/errorHandler";
 import { serializeJson } from "../utils/json";
 import { requireAdmin, requireOwnSeller } from "../middleware/rbac";
 

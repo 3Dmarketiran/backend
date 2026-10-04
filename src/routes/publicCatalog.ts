@@ -458,12 +458,12 @@ async function publicLogoUrl(
   // Always expose the logo through our backend public-asset route. This avoids
   // leaking provider-specific URLs and guarantees the browser gets consistent
   // CORS/MIME/cache behavior even when the underlying storage provider changes.
-  const storageKey = logoStorageKey || extractStorageKey(logoUrl) || extractLegacyPublicStorageKey(logoUrl);
+  const storageKey = logoStorageKey || extractStorageKey(logoUrl ?? undefined) || extractLegacyPublicStorageKey(logoUrl);
   if (storageKey) return absolutePublicAssetUrl(req, storageKey);
 
   // Legacy rows that predate logoStorageKey: only return a pre-existing
   // absolute HTTPS URL. Never invent a fallback route that may not exist.
-  if (/^https:\/\//i.test(logoUrl)) return logoUrl;
+  if (logoUrl && /^https:\/\//i.test(logoUrl)) return logoUrl;
   logger.warn({ sellerSlug }, "public seller logo could not be resolved; catalog will continue without logo");
   return null;
 }

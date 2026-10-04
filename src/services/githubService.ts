@@ -169,6 +169,8 @@ type GitHubWorkflowRun = {
   status: string | null;
   conclusion: string | null;
   head_sha: string;
+  created_at?: string;
+  updated_at?: string;
   html_url?: string;
 };
 
@@ -187,18 +189,7 @@ async function listWorkflowRuns(workflowPath: string): Promise<GitHubWorkflowRun
   return data.workflow_runs ?? [];
 }
 
-async function getWorkflowRun(runId: number): Promise<GitHubWorkflowRun> {
-  assertConfigured();
-  const response = await fetch(`${repositoryBaseUrl()}/actions/runs/${runId}`, {
-    headers: authHeaders(),
-    signal: createAbortSignal(),
-  });
-  if (!response.ok) {
-    const details = await readGitHubError(response);
-    throw new HttpError(502, `دریافت وضعیت اجرای Workflow ناموفق بود (${response.status}).${details ? ` جزئیات: ${details}` : ""}`);
-  }
-  return (await response.json()) as GitHubWorkflowRun;
-}
+
 
 /**
  * Dispatch the public Pages workflow and wait for the run attached to the
@@ -212,6 +203,11 @@ export async function dispatchPublicSiteBuildAndWait(
   assertConfigured();
   const workflowPath = "deploy.yml";
   const dispatchUrl = `${repositoryBaseUrl()}/actions/workflows/${workflowPath}/dispatches`;
+  const knownRunIds = new Set(
+    (await listWorkflowRuns(workflowPath)).map((run) => run.id),
+  );
+  const dispatchStartedAt = Date.now();
+
   const response = await fetch(dispatchUrl, {
     method: "POST",
     headers: { ...authHeaders(), "Content-Type": "application/json" },
@@ -227,20 +223,31 @@ export async function dispatchPublicSiteBuildAndWait(
     );
   }
 
-  const deadline = Date.now() + timeoutMs;
+  const deadline = dispatchStartedAt + timeoutMs;
   let matchingRun: GitHubWorkflowRun | null = null;
 
   while (Date.now() < deadline) {
     const runs = await listWorkflowRuns(workflowPath);
-    matchingRun = runs.find((run) => run.head_sha === expectedCommitSha) ?? null;
 
-    if (matchingRun) {
-      if (matchingRun.status === "completed") {
-        if (matchingRun.conclusion !== "success") {
-          throw new HttpError(502, `Workflow سایت عمومی برای commit ${expectedCommitSha.slice(0, 8)} موفق نبود (نتیجه: ${matchingRun.conclusion ?? "unknown"}).`);
-        }
-        return matchingRun;
+    // Never reuse an older successful run for the same commit. We only accept
+    // the workflow run created by this dispatch (new run id), otherwise a
+    // repeated publish of an unchanged catalog could be falsely reported as
+    // successful even when the new dispatch never actually completed.
+    const freshRuns = runs
+      .filter((run) => !knownRunIds.has(run.id) && run.head_sha === expectedCommitSha)
+      .sort((a, b) => {
+        const aTime = Date.parse(a.created_at ?? "") || 0;
+        const bTime = Date.parse(b.created_at ?? "") || 0;
+        return bTime - aTime || b.id - a.id;
+      });
+
+    matchingRun = freshRuns[0] ?? null;
+
+    if (matchingRun?.status === "completed") {
+      if (matchingRun.conclusion !== "success") {
+        throw new HttpError(502, `Workflow سایت عمومی برای commit ${expectedCommitSha.slice(0, 8)} موفق نبود (نتیجه: ${matchingRun.conclusion ?? "unknown"}).`);
       }
+      return matchingRun;
     }
 
     await new Promise((resolve) => setTimeout(resolve, 1500));
@@ -276,8 +283,7 @@ export async function verifyPublicDeployment(
     try {
       const url = `${base}/public-data/catalog.json?verify=${encodeURIComponent(expectedCatalogVersion)}`;
       const response = await fetch(url, {
-        cache: "no-store",
-        headers: { Accept: "application/json" },
+        headers: { Accept: "application/json", "Cache-Control": "no-cache", Pragma: "no-cache" },
         signal: createAbortSignal(10_000),
       });
       if (!response.ok) {
@@ -918,9 +924,20 @@ export async function testConnection(): Promise<{
       };
     }
 
+    const workflow = await fetch(
+      `${repositoryBaseUrl()}/actions/workflows/deploy.yml`,
+      { headers: authHeaders(), signal: createAbortSignal(HEALTH_CHECK_TIMEOUT_MS) },
+    );
+    if (!workflow.ok) {
+      return {
+        ok: false,
+        message: `Repository وصل است، اما deploy.yml قابل دسترسی نیست (${workflow.status}).`,
+      };
+    }
+
     return {
       ok: true,
-      message: "اتصال به GitHub برقرار است.",
+      message: "اتصال به GitHub و Workflow انتشار برقرار است.",
     };
   } catch (error) {
     return {

@@ -540,7 +540,7 @@ async function processPublishJob(
       }
     }
   } catch (error) {
-    const message =
+    let message =
       error instanceof Error
         ? error.message
         : "خطای نامشخص در انتشار.";

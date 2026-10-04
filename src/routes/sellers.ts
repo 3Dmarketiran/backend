@@ -481,7 +481,7 @@ sellersRouter.get(
         return res.status(404).end();
       }
 
-      const storageKey = seller.logoStorageKey || extractStorageKeyFromUrl(seller.logoUrl);
+      const storageKey = seller.logoStorageKey || extractStorageKeyFromUrl(seller.logoUrl ?? undefined);
       if (!storageKey) {
         throw new HttpError(503, "لوگوی این فروشگاه هنوز به ذخیره‌سازی داخلی منتقل نشده است.");
       }
@@ -865,7 +865,7 @@ sellersRouter.get(
       });
       if (!seller?.logoUrl) return res.status(404).end();
 
-      const storageKey = seller.logoStorageKey || extractStorageKeyFromUrl(seller.logoUrl);
+      const storageKey = seller.logoStorageKey || extractStorageKeyFromUrl(seller.logoUrl ?? undefined);
       if (!storageKey) return res.redirect(seller.logoUrl);
 
       const buffer = await storage.read(storageKey);
