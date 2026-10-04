@@ -157,6 +157,39 @@ async function readGitHubError(
  * layer. Product binaries should remain in the configured asset storage
  * or dedicated Release assets.
  */
+/**
+ * Explicitly starts the public GitHub Pages workflow after the backend
+ * writes catalog JSON through the GitHub Contents API. Push events created
+ * with GitHub's repository GITHUB_TOKEN do not trigger other workflows;
+ * workflow_dispatch avoids that silent no-build condition.
+ * The token therefore needs Actions: write in addition to Contents: read/write.
+ */
+export async function dispatchPublicSiteBuild(): Promise<void> {
+  assertConfigured();
+
+  const workflowPath = "deploy.yml";
+  const url = `${repositoryBaseUrl()}/actions/workflows/${workflowPath}/dispatches`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      ...authHeaders(),
+      "Content-Type": "application/json",
+    },
+    signal: createAbortSignal(),
+    body: JSON.stringify({ ref: env.GITHUB_BRANCH }),
+  });
+
+  if (response.status !== 204) {
+    const details = await readGitHubError(response);
+    throw new HttpError(
+      502,
+      `داده‌های کاتالوگ در GitHub ثبت شدند، اما اجرای Build سایت شروع نشد (${response.status}). ` +
+        `دسترسی Actions: write، وجود فایل .github/workflows/${workflowPath} و نام ریپو را بررسی کنید.` +
+        (details ? ` جزئیات: ${details}` : "")
+    );
+  }
+}
+
 export async function upsertFile(
   path: string,
   content: string,

@@ -2,6 +2,7 @@ import { prisma } from "../config/prisma";
 import {
   upsertFile,
   deleteFile,
+  dispatchPublicSiteBuild,
 } from "./githubService";
 import { publishQueue } from "./publishQueue";
 import {
@@ -355,9 +356,15 @@ async function processPublishJob(
         `chore(publish): update atomic public catalog [job ${jobId}]`
       );
 
+    // Contents API commits made by a GitHub token do not reliably trigger
+    // push-based workflows. Explicitly dispatch Pages after the atomic catalog
+    // pointer is committed so the public site actually rebuilds.
+    await log(jobId, "کاتالوگ ثبت شد؛ در حال راه‌اندازی Workflow ساخت سایت عمومی...");
+    await dispatchPublicSiteBuild();
+
     await log(
       jobId,
-      `انتشار در GitHub موفق بود. کاتالوگ عمومی به‌صورت atomic به‌روزرسانی شد. آخرین commit: ${lastCommitSha}`
+      `کاتالوگ در GitHub ثبت شد و اجرای Workflow انتشار سایت پذیرفته شد. آخرین commit: ${lastCommitSha}`
     );
 
     const completedJob =
