@@ -458,7 +458,7 @@ async function publicLogoUrl(
   // Always expose the logo through our backend public-asset route. This avoids
   // leaking provider-specific URLs and guarantees the browser gets consistent
   // CORS/MIME/cache behavior even when the underlying storage provider changes.
-  const storageKey = logoStorageKey || extractStorageKey(logoUrl ?? undefined) || extractLegacyPublicStorageKey(logoUrl);
+  const storageKey = logoStorageKey || (logoUrl ? extractStorageKey(logoUrl) : null) || extractLegacyPublicStorageKey(logoUrl);
   if (storageKey) return absolutePublicAssetUrl(req, storageKey);
 
   // Legacy rows that predate logoStorageKey: only return a pre-existing
