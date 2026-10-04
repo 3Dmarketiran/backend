@@ -247,7 +247,7 @@ export async function dispatchPublicSiteBuildAndWait(
         return matchingRun;
       }
     } catch (error) {
-      if (error instanceof HttpError && error.status === 502 && /Workflow سایت عمومی برای commit/.test(error.message)) throw error;
+      if (error instanceof HttpError && error.statusCode === 502 && /Workflow سایت عمومی برای commit/.test(error.message)) throw error;
       lastPollError = error instanceof Error ? error.message : "خطای نامشخص در بررسی Workflow";
     }
     await new Promise((resolve) => setTimeout(resolve, 1800));
