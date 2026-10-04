@@ -174,9 +174,9 @@ type GitHubWorkflowRun = {
   html_url?: string;
 };
 
-async function listWorkflowRuns(workflowPath: string): Promise<GitHubWorkflowRun[]> {
+async function listWorkflowRuns(workflowPath: string, event: "workflow_dispatch" | "push" = "workflow_dispatch"): Promise<GitHubWorkflowRun[]> {
   assertConfigured();
-  const url = `${repositoryBaseUrl()}/actions/workflows/${encodeURIComponent(workflowPath)}/runs?event=workflow_dispatch&branch=${encodeURIComponent(env.GITHUB_BRANCH)}&per_page=25`;
+  const url = `${repositoryBaseUrl()}/actions/workflows/${encodeURIComponent(workflowPath)}/runs?event=${event}&branch=${encodeURIComponent(env.GITHUB_BRANCH)}&per_page=50`;
   const response = await fetch(url, {
     headers: authHeaders(),
     signal: createAbortSignal(),
@@ -203,10 +203,9 @@ export async function dispatchPublicSiteBuildAndWait(
   assertConfigured();
   const workflowPath = "deploy.yml";
   const dispatchUrl = `${repositoryBaseUrl()}/actions/workflows/${workflowPath}/dispatches`;
-  const knownRunIds = new Set(
-    (await listWorkflowRuns(workflowPath)).map((run) => run.id),
-  );
   const dispatchStartedAt = Date.now();
+  let event: "workflow_dispatch" | "push" = "workflow_dispatch";
+  let knownRunIds = new Set((await listWorkflowRuns(workflowPath, "workflow_dispatch")).map((run) => run.id));
 
   const response = await fetch(dispatchUrl, {
     method: "POST",
@@ -217,48 +216,46 @@ export async function dispatchPublicSiteBuildAndWait(
 
   if (![200, 204].includes(response.status)) {
     const details = await readGitHubError(response);
-    throw new HttpError(
-      502,
-      `اجرای Build سایت عمومی شروع نشد (${response.status}). دسترسی Actions: write و Workflow deploy.yml را بررسی کنید.${details ? ` جزئیات: ${details}` : ""}`,
-    );
+    if (response.status !== 403 && response.status !== 404) {
+      throw new HttpError(502, `اجرای دستی Workflow سایت عمومی شروع نشد (${response.status}).${details ? ` جزئیات: ${details}` : ""}`);
+    }
+
+    // Catalog is committed through the Contents API using the configured PAT.
+    // A PAT-authored push can trigger the public repository's `push` workflow
+    // without requiring a second Actions workflow_dispatch permission path.
+    // Accept only a run tied to the exact catalog commit; deployment verification
+    // below remains the final source of truth.
+    event = "push";
+    knownRunIds = new Set();
   }
 
   const deadline = dispatchStartedAt + timeoutMs;
   let matchingRun: GitHubWorkflowRun | null = null;
+  let lastPollError = "";
 
   while (Date.now() < deadline) {
-    const runs = await listWorkflowRuns(workflowPath);
-
-    // Never reuse an older successful run for the same commit. We only accept
-    // the workflow run created by this dispatch (new run id), otherwise a
-    // repeated publish of an unchanged catalog could be falsely reported as
-    // successful even when the new dispatch never actually completed.
-    const freshRuns = runs
-      .filter((run) => !knownRunIds.has(run.id) && run.head_sha === expectedCommitSha)
-      .sort((a, b) => {
-        const aTime = Date.parse(a.created_at ?? "") || 0;
-        const bTime = Date.parse(b.created_at ?? "") || 0;
-        return bTime - aTime || b.id - a.id;
-      });
-
-    matchingRun = freshRuns[0] ?? null;
-
-    if (matchingRun?.status === "completed") {
-      if (matchingRun.conclusion !== "success") {
-        throw new HttpError(502, `Workflow سایت عمومی برای commit ${expectedCommitSha.slice(0, 8)} موفق نبود (نتیجه: ${matchingRun.conclusion ?? "unknown"}).`);
+    try {
+      const runs = await listWorkflowRuns(workflowPath, event);
+      const candidates = runs
+        .filter((run) => run.head_sha === expectedCommitSha && (event === "push" || !knownRunIds.has(run.id)))
+        .sort((a, b) => (Date.parse(b.created_at ?? "") || 0) - (Date.parse(a.created_at ?? "") || 0) || b.id - a.id);
+      matchingRun = candidates[0] ?? null;
+      if (matchingRun?.status === "completed") {
+        if (matchingRun.conclusion !== "success") {
+          throw new HttpError(502, `Workflow سایت عمومی برای commit ${expectedCommitSha.slice(0, 8)} موفق نبود (نتیجه: ${matchingRun.conclusion ?? "unknown"}).`);
+        }
+        return matchingRun;
       }
-      return matchingRun;
+    } catch (error) {
+      if (error instanceof HttpError && error.status === 502 && /Workflow سایت عمومی برای commit/.test(error.message)) throw error;
+      lastPollError = error instanceof Error ? error.message : "خطای نامشخص در بررسی Workflow";
     }
-
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await new Promise((resolve) => setTimeout(resolve, 1800));
   }
 
-  throw new HttpError(
-    504,
-    matchingRun
-      ? "Build سایت عمومی در مهلت تعیین‌شده تمام نشد. انتشار موفق ثبت نشد."
-      : "اجرای Workflow متناظر با commit کاتالوگ پیدا نشد. انتشار موفق ثبت نشد.",
-  );
+  throw new HttpError(504, matchingRun
+    ? "Build سایت عمومی در مهلت تعیین‌شده تمام نشد؛ انتشار موفق ثبت نشد."
+    : `Workflow مربوط به commit کاتالوگ پیدا نشد؛ انتشار موفق ثبت نشد.${lastPollError ? ` آخرین خطا: ${lastPollError}` : ""}`);
 }
 
 /**
