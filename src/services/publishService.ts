@@ -1,4 +1,5 @@
 import { prisma } from "../config/prisma";
+import { env } from "../config/env";
 import {
   upsertFile,
   deleteFile,
@@ -730,7 +731,7 @@ async function getPublicProducts(
         product.images.map(
           (image) => ({
             url:
-              image.url,
+              publicAssetUrl(image.storageKey, image.url),
 
             isPrimary:
               image.isPrimary,
@@ -744,7 +745,7 @@ async function getPublicProducts(
               model.kind,
 
             url:
-              model.url,
+              publicAssetUrl(model.storageKey, model.url),
           })
         );
 
@@ -930,13 +931,27 @@ async function getPublicSellers() {
 }
 
 
+function publicAssetUrl(storageKey: string | null | undefined, fallbackUrl?: string | null): string {
+  // Published snapshots are hosted on GitHub Pages, so root-relative API
+  // paths resolve against the Pages domain and break. Always publish an
+  // absolute backend URL for proxy-backed assets.
+  const backendBase = (env.API_URL || "https://threedmarketiran-backend.onrender.com").replace(/\/$/, "");
+  if (storageKey) {
+    const encoded = storageKey
+      .split("/")
+      .filter(Boolean)
+      .map((part) => encodeURIComponent(part))
+      .join("/");
+    return `${backendBase}/api/public/assets/${encoded}`;
+  }
+
+  if (fallbackUrl && /^https?:\/\//i.test(fallbackUrl)) return fallbackUrl;
+  if (fallbackUrl?.startsWith("/api/public/assets/")) return `${backendBase}${fallbackUrl}`;
+  return fallbackUrl || "";
+}
+
 function publicAssetProxyUrl(storageKey: string): string {
-  const encoded = storageKey
-    .split("/")
-    .filter(Boolean)
-    .map((part) => encodeURIComponent(part))
-    .join("/");
-  return `/api/public/assets/${encoded}`;
+  return publicAssetUrl(storageKey);
 }
 
 
