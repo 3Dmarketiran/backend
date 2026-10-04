@@ -21,6 +21,7 @@ import * as productService from "../services/productService";
 import * as assetService from "../services/assetService";
 import * as productPackageService from "../services/productPackageService";
 import { prisma } from "../config/prisma";
+import { queueRepublishForSeller } from "../services/publishService";
 
 export const productsRouter = Router();
 
@@ -123,16 +124,29 @@ productsRouter.get(
           req.user?.role
         );
 
-      if (
-        !isOwner &&
-        !isStaff &&
-        product.visibility !==
-          "PUBLISHED"
-      ) {
+      if (!isOwner && !isStaff) {
+        const now = new Date();
+        const sellerPublic = await prisma.seller.findFirst({
+          where: {
+            id: product.sellerId,
+            isActive: true,
+            subscriptions: {
+              some: {
+                status: "ACTIVE",
+                startDate: { lte: now },
+                endDate: { gte: now },
+                plan: { is: { isActive: true } },
+              },
+            },
+          },
+          select: { id: true },
+        });
+        if (product.visibility !== "PUBLISHED" || product.hasUnpublishedChanges || !sellerPublic) {
         throw new HttpError(
           404,
           "محصول یافت نشد."
         );
+        }
       }
 
       const host = req.get("host");
@@ -307,14 +321,17 @@ productsRouter.delete(
       await prisma.auditLog.create({
         data: {
           actorId: req.user!.id,
-          sellerId:
-            existing.sellerId,
+          sellerId: existing.sellerId,
           action: "PRODUCT_DELETED",
           entity: "Product",
           entityId: productId,
           ipAddress: req.ip,
         },
       });
+
+      // Rebuild even for HIDDEN/failed states: a previous failed publication
+      // may have left the deleted product inside the last public snapshot.
+      queueRepublishForSeller(existing.sellerId, req.user!.id);
 
       res.status(204).send();
     } catch (err) {
@@ -663,13 +680,11 @@ productsRouter.post(
           "شناسه محصول نامعتبر است."
         );
 
-      const product =
-        await productService.updateProduct(
-          productId,
-          {
-            visibility: "HIDDEN",
-          }
-        );
+      const existing = await productService.getProductById(productId);
+      const product = await prisma.product.update({
+        where: { id: productId },
+        data: { visibility: "HIDDEN", hasUnpublishedChanges: false },
+      });
 
       await prisma.auditLog.create({
         data: {
@@ -683,9 +698,9 @@ productsRouter.post(
         },
       });
 
-      res.json({
-        product,
-      });
+      queueRepublishForSeller(existing.sellerId, req.user!.id);
+
+      res.json({ product });
     } catch (err) {
       next(err);
     }

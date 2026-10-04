@@ -3,8 +3,9 @@ import { z } from "zod";
 import { prisma } from "../config/prisma";
 import { requireAuth } from "../middleware/auth";
 import { requireAdmin } from "../middleware/rbac";
+import { HttpError } from "../middleware/errorHandler";
 import { slugify } from "../utils/slug";
-import { republishForAllSellers } from "../services/publishService";
+import { queueRepublishForAllSellers } from "../services/publishService";
 
 export const categoriesRouter = Router();
 
@@ -123,6 +124,9 @@ const categoryUpdateSchema = z.object({
 
 categoriesRouter.get("/", async (req, res, next) => {
   try {
+    if (req.query.includeInactive === "true" && !(req.user && ["ADMIN", "SUPER_ADMIN"].includes(req.user.role))) {
+      throw new HttpError(403, "دسترسی مدیر لازم است.");
+    }
     const includeInactive =
       String(req.query.includeInactive || "").toLowerCase() === "true";
 
@@ -235,7 +239,7 @@ categoriesRouter.post(
         },
       });
 
-      void republishForAllSellers(req.user!.id);
+      queueRepublishForAllSellers(req.user!.id);
 
       res.status(201).json({
         category,
@@ -318,9 +322,7 @@ categoriesRouter.put(
         },
       });
 
-      void republishForAllSellers(req.user!.id);
-
-      void republishForAllSellers(req.user!.id);
+      queueRepublishForAllSellers(req.user!.id);
 
       res.json({
         category,
@@ -464,7 +466,7 @@ categoriesRouter.delete(
         },
       });
 
-      void republishForAllSellers(req.user!.id);
+      queueRepublishForAllSellers(req.user!.id);
 
       res.status(204).send();
     } catch (err) {

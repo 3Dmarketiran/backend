@@ -28,14 +28,81 @@ const trackSchema = z.object({
 analyticsRouter.post("/track", async (req, res, next) => {
   try {
     const input = trackSchema.parse(req.body);
-    await prisma.analyticsEvent.create({
-      data: {
-        type: input.type,
-        sellerId: input.sellerId,
-        productId: input.productId,
-        metadata: serializeJson(input.metadata),
-      },
-    });
+    const productEvent = new Set([
+      "PRODUCT_VIEW",
+      "PRODUCT_DETAIL_VIEW",
+      "VIEWER_3D_OPEN",
+      "AR_LAUNCH",
+    ]).has(input.type);
+
+    if (productEvent) {
+      if (!input.productId) throw new HttpError(400, "شناسه محصول برای این رویداد الزامی است.");
+      const now = new Date();
+      const product = await prisma.product.findFirst({
+        where: {
+          id: input.productId,
+          visibility: "PUBLISHED",
+          hasUnpublishedChanges: false,
+          seller: {
+            isActive: true,
+            subscriptions: {
+              some: {
+                status: "ACTIVE",
+                startDate: { lte: now },
+                endDate: { gte: now },
+                plan: { is: { isActive: true } },
+              },
+            },
+          },
+        },
+        select: { sellerId: true },
+      });
+      if (!product) throw new HttpError(404, "محصول عمومی یافت نشد.");
+      if (input.sellerId && input.sellerId !== product.sellerId) {
+        throw new HttpError(400, "ارتباط فروشنده و محصول نامعتبر است.");
+      }
+      await prisma.analyticsEvent.create({
+        data: {
+          type: input.type,
+          sellerId: product.sellerId,
+          productId: input.productId,
+          metadata: serializeJson(input.metadata),
+        },
+      });
+    } else if (input.type === "SELLER_PAGE_VIEW") {
+      if (!input.sellerId) throw new HttpError(400, "شناسه فروشنده برای این رویداد الزامی است.");
+      const seller = await prisma.seller.findFirst({
+        where: {
+          id: input.sellerId,
+          isActive: true,
+          subscriptions: {
+            some: {
+              status: "ACTIVE",
+              startDate: { lte: new Date() },
+              endDate: { gte: new Date() },
+              plan: { is: { isActive: true } },
+            },
+          },
+        },
+        select: { id: true },
+      });
+      if (!seller) throw new HttpError(404, "فروشگاه عمومی یافت نشد.");
+      await prisma.analyticsEvent.create({
+        data: {
+          type: input.type,
+          sellerId: seller.id,
+          metadata: serializeJson(input.metadata),
+        },
+      });
+    } else {
+      await prisma.analyticsEvent.create({
+        data: {
+          type: input.type,
+          metadata: serializeJson(input.metadata),
+        },
+      });
+    }
+
     res.status(202).json({ success: true });
   } catch (err) {
     next(err);

@@ -64,14 +64,11 @@ export const createProductSchema = z.object({
  *
  * to the normal product update endpoint.
  *
- * HIDDEN remains available because a seller/admin may intentionally hide
- * an existing product without publishing it.
+ * Visibility changes are intentionally excluded.
+ * Sellers use the dedicated publish/unpublish operations and admins use
+ * the moderation endpoint, so no normal edit can desynchronize GitHub Pages.
  */
-export const updateProductSchema =
-  createProductSchema.partial().extend({
-    visibility:
-      z.literal("HIDDEN").optional(),
-  });
+export const updateProductSchema = createProductSchema.partial();
 
 export const listProductsQuerySchema =
   z.object({

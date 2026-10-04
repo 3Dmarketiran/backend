@@ -182,6 +182,7 @@ export async function listProducts(
      */
     andConditions.push({
       visibility: "PUBLISHED",
+      hasUnpublishedChanges: false,
     });
 
     andConditions.push({
@@ -558,13 +559,8 @@ export async function updateProduct(
       ? true
       : existing.hasUnpublishedChanges;
 
-  /*
-   * PUBLISHED should only be reached through the dedicated publish
-   * flow. The validator normally prevents direct publication.
-   */
-  const nextVisibility =
-    input.visibility ??
-    existing.visibility;
+  // Visibility is intentionally owned by the dedicated publish/unpublish
+  // lifecycle. Normal edits can never change it directly.
 
   return prisma.product.update({
     where: {
@@ -616,8 +612,7 @@ export async function updateProduct(
           ? JSON.stringify(input.colors)
           : existing.colors,
 
-      visibility:
-        nextVisibility,
+      visibility: existing.visibility,
 
       hasUnpublishedChanges,
 

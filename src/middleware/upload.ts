@@ -238,10 +238,34 @@ export async function assertValidModel(
           "missing asset.version"
         );
       }
-    } catch {
+
+      // A direct single-file GLTF upload cannot safely expose referenced
+      // .bin/texture files unless those dependencies are uploaded in the same
+      // model folder. The current single-file endpoint has no way to establish
+      // those references, so reject external URIs instead of publishing a
+      // model that renders half-empty in the public viewer. Use GLB or the
+      // package upload for a multi-file GLTF scene.
+      const externalUris: string[] = [];
+      for (const bufferItem of Array.isArray(parsed.buffers) ? parsed.buffers : []) {
+        if (typeof bufferItem?.uri === "string" && !bufferItem.uri.startsWith("data:")) {
+          externalUris.push(bufferItem.uri);
+        }
+      }
+      for (const imageItem of Array.isArray(parsed.images) ? parsed.images : []) {
+        if (typeof imageItem?.uri === "string" && !imageItem.uri.startsWith("data:")) {
+          externalUris.push(imageItem.uri);
+        }
+      }
+      if (externalUris.length > 0) {
+        throw new Error("external dependencies");
+      }
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
       throw new HttpError(
         400,
-        "فایل GLTF نامعتبر است."
+        error instanceof Error && error.message === "external dependencies"
+          ? "این GLTF به فایل‌های جانبی (.BIN/Texture) وابسته است. برای انتشار از GLB استفاده کنید یا بسته کامل GLTF را از مسیر بسته فایل‌ها آپلود کنید."
+          : "فایل GLTF نامعتبر است."
       );
     }
   }

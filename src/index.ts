@@ -15,7 +15,8 @@ import { rateLimit } from "express-rate-limit";
 import { env, isProduction } from "./config/env";
 import { prisma } from "./config/prisma";
 import { attachUser } from "./middleware/auth";
-import { apiRateLimiter } from "./middleware/rateLimit";
+import { csrfProtection } from "./middleware/csrf";
+import { apiRateLimiter, publicApiRateLimiter } from "./middleware/rateLimit";
 
 import { healthRouter } from "./routes/health";
 import { authRouter } from "./routes/auth";
@@ -25,8 +26,10 @@ import { subscriptionsRouter } from "./routes/subscriptions";
 import { analyticsRouter } from "./routes/analytics";
 import { adminSettingsRouter } from "./routes/adminSettings";
 import { publishingRouter, mountPublishingOnProducts } from "./routes/publishing";
+import { recoverPendingPublishJobs } from "./services/publishService";
 import { publicCatalogRouter } from "./routes/publicCatalog";
 import { trafficRouter } from "./routes/traffic";
+import { categoriesRouter } from "./routes/categories";
 
 import { expireOverdueSubscriptions } from "./routes/subscriptions";
 
@@ -190,6 +193,7 @@ app.use(
 /* -------------------------------------------------------------------------- */
 
 app.use("/api", attachUser);
+app.use("/api", csrfProtection);
 
 /* -------------------------------------------------------------------------- */
 /* Public/local storage                                                       */
@@ -213,7 +217,7 @@ if (env.STORAGE_PROVIDER === "local") {
 /* -------------------------------------------------------------------------- */
 
 app.use("/api/health", healthRouter);
-app.use("/api/public", publicCatalogRouter);
+app.use("/api/public", publicApiRateLimiter, publicCatalogRouter);
 
 /* -------------------------------------------------------------------------- */
 /* API routes                                                                 */
@@ -222,6 +226,7 @@ app.use("/api/public", publicCatalogRouter);
 app.use("/api/auth", authRouter);
 mountPublishingOnProducts(productsRouter);
 app.use("/api/products", productsRouter);
+app.use("/api/categories", categoriesRouter);
 app.use("/api/sellers", sellersRouter);
 app.use("/api/subscriptions", subscriptionsRouter);
 app.use("/api/analytics", analyticsRouter);
@@ -301,6 +306,12 @@ const server = app.listen(PORT, () => {
   console.log(
     `[server] environment=${env.NODE_ENV} storage=${env.STORAGE_PROVIDER}`,
   );
+});
+
+void recoverPendingPublishJobs().then((count) => {
+  if (count > 0) console.log(`[publish] recovered ${count} pending job(s)`);
+}).catch((error) => {
+  console.error("[publish] failed to recover pending jobs", error);
 });
 
 /* -------------------------------------------------------------------------- */

@@ -20,6 +20,13 @@ export const PUBLISH_JOB_STATUS = {
 } as const;
 export type PublishJobStatus = (typeof PUBLISH_JOB_STATUS)[keyof typeof PUBLISH_JOB_STATUS];
 
+export const PUBLISH_JOB_OPERATION = {
+  PUBLISH: "PUBLISH",
+  UNPUBLISH: "UNPUBLISH",
+  REBUILD: "REBUILD",
+} as const;
+export type PublishJobOperation = (typeof PUBLISH_JOB_OPERATION)[keyof typeof PUBLISH_JOB_OPERATION];
+
 export const SUBSCRIPTION_STATUS = {
   ACTIVE: "ACTIVE",
   EXPIRED: "EXPIRED",

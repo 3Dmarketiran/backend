@@ -1,9 +1,11 @@
 import { env } from "../config/env";
 import { prisma } from "../config/prisma";
+import { Prisma } from "@prisma/client";
 import {
   upsertFile,
   deleteFile,
-  dispatchPublicSiteBuild,
+  dispatchPublicSiteBuildAndWait,
+  verifyPublicDeployment,
 } from "./githubService";
 import { publishQueue } from "./publishQueue";
 import {
@@ -12,6 +14,7 @@ import {
 import { millimetersToMeters } from "../utils/dimensions";
 import { HttpError } from "../middleware/errorHandler";
 import { logger } from "../utils/logger";
+import { parsePackageStorageKey, packageAssetUrl } from "./productPackageService";
 import {
   parseJson,
   serializeJson,
@@ -19,6 +22,10 @@ import {
 
 const PUBLIC_DATA_DIR =
   "public-data";
+
+function isPrismaUniqueViolation(error: unknown): boolean {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+}
 
 /**
  * Enqueues a publish job for one product.
@@ -52,9 +59,15 @@ export async function requestPublish(
     );
   }
 
-  await assertSellerCanPublish(
-    product.sellerId
-  );
+  await assertSellerCanPublish(product.sellerId);
+
+  const activeJob = await prisma.publishJob.findFirst({
+    where: { productId: product.id, status: { in: ["QUEUED", "PROCESSING"] } },
+    select: { id: true },
+  });
+  if (activeJob) {
+    throw new HttpError(409, "برای این محصول یک عملیات انتشار در حال انجام است.");
+  }
 
   if (product.models.length > 0) {
     const dimensionsAreComplete =
@@ -70,22 +83,32 @@ export async function requestPublish(
     }
   }
 
-  const job =
-    await prisma.publishJob.create({
-      data: {
-        sellerId:
-          product.sellerId,
-
-        productId:
-          product.id,
-
-        triggeredById:
-          triggeredByUserId,
-
-        status:
-          "QUEUED",
-      },
+  // Mark the product as pending publication before queueing. The public API
+  // excludes hasUnpublishedChanges=true, so edited/new data cannot become
+  // visible before the static snapshot is actually deployed.
+  let job: Awaited<ReturnType<typeof prisma.publishJob.create>>;
+  try {
+    job = await prisma.$transaction(async (tx) => {
+      await tx.product.update({
+        where: { id: product.id },
+        data: { visibility: "PUBLISHED", hasUnpublishedChanges: true },
+      });
+      return tx.publishJob.create({
+        data: {
+          sellerId: product.sellerId,
+          productId: product.id,
+          triggeredById: triggeredByUserId,
+          status: "QUEUED",
+          operation: "PUBLISH",
+        },
+      });
     });
+  } catch (error) {
+    if (isPrismaUniqueViolation(error)) {
+      throw new HttpError(409, "برای این محصول یک عملیات انتشار در حال انجام است.");
+    }
+    throw error;
+  }
 
   publishQueue.enqueue(() =>
     processPublishJob(job.id)
@@ -104,70 +127,60 @@ export async function requestUnpublish(
   productId: string,
   triggeredByUserId: string
 ) {
-  const product =
-    await prisma.product.findUnique({
-      where: {
-        id: productId,
-      },
-      select: {
-        id: true,
-        sellerId: true,
-        visibility: true,
-      },
-    });
-
-  if (!product) {
-    throw new HttpError(
-      404,
-      "محصول یافت نشد."
-    );
-  }
-
-  if (
-    product.visibility ===
-    "HIDDEN"
-  ) {
-    throw new HttpError(
-      409,
-      "این محصول در حال حاضر از سایت عمومی مخفی است."
-    );
-  }
-
-  await prisma.product.update({
-    where: {
-      id: productId,
-    },
-
-    data: {
-      visibility:
-        "HIDDEN",
-
-      hasUnpublishedChanges:
-        false,
-    },
+  const product = await prisma.product.findUnique({
+    where: { id: productId },
+    select: { id: true, sellerId: true, visibility: true },
   });
 
-  const job =
-    await prisma.publishJob.create({
-      data: {
-        sellerId:
-          product.sellerId,
+  if (!product) {
+    throw new HttpError(404, "محصول یافت نشد.");
+  }
 
-        productId:
-          product.id,
+  const activeJob = await prisma.publishJob.findFirst({
+    where: { productId, status: { in: ["QUEUED", "PROCESSING"] } },
+    select: { id: true },
+  });
+  if (activeJob) {
+    throw new HttpError(409, "برای این محصول یک عملیات انتشار در حال انجام است.");
+  }
 
-        triggeredById:
-          triggeredByUserId,
+  const lastFailed = await prisma.publishJob.findFirst({
+    where: { productId, status: "FAILED", operation: "UNPUBLISH" },
+    orderBy: { finishedAt: "desc" },
+    select: { id: true },
+  });
 
-        status:
-          "QUEUED",
-      },
+  // A failed unpublish leaves the DB hidden while the old GitHub snapshot may
+  // still contain the product. Allow the same endpoint to retry that cleanup.
+  if (product.visibility === "HIDDEN" && !lastFailed) {
+    throw new HttpError(409, "این محصول در حال حاضر از سایت عمومی مخفی است.");
+  }
+
+  let job: Awaited<ReturnType<typeof prisma.publishJob.create>>;
+  try {
+    job = await prisma.$transaction(async (tx) => {
+      await tx.product.update({
+        where: { id: productId },
+        data: { visibility: "HIDDEN", hasUnpublishedChanges: false },
+      });
+      return tx.publishJob.create({
+        data: {
+          sellerId: product.sellerId,
+          productId: product.id,
+          triggeredById: triggeredByUserId,
+          status: "QUEUED",
+          operation: "UNPUBLISH",
+        },
+      });
     });
+  } catch (error) {
+    if (isPrismaUniqueViolation(error)) {
+      throw new HttpError(409, "برای این محصول یک عملیات انتشار در حال انجام است.");
+    }
+    throw error;
+  }
 
-  publishQueue.enqueue(() =>
-    processPublishJob(job.id)
-  );
-
+  publishQueue.enqueue(() => processPublishJob(job.id));
   return job;
 }
 
@@ -218,23 +231,18 @@ async function processPublishJob(
 ) {
   const startedAt =
     new Date();
+  let publicDeploymentVerified = false;
+  let verifiedProductId: string | null = null;
+  let verifiedOperation: string | null = null;
+  let verifiedExpectedProductPresent: boolean | null = null;
+  let verifiedSnapshotCapturedAt: Date | null = null;
 
   try {
-    await prisma.publishJob.update({
-      where: {
-        id: jobId,
-      },
-
-      data: {
-        status:
-          "PROCESSING",
-
-        startedAt,
-
-        errorMessage:
-          null,
-      },
+    const claim = await prisma.publishJob.updateMany({
+      where: { id: jobId, status: "QUEUED" },
+      data: { status: "PROCESSING", startedAt, errorMessage: null },
     });
+    if (claim.count !== 1) return;
 
     await log(
       jobId,
@@ -269,6 +277,9 @@ async function processPublishJob(
       }),
     ]);
 
+    const snapshotCapturedAt = new Date();
+    let expectedProductPresent: boolean | null = null;
+
     await log(
       jobId,
       `تولید داده استاتیک: ${products.length} محصول و ${sellers.length} فروشنده.`
@@ -282,7 +293,7 @@ async function processPublishJob(
 
     const requestedJob = await prisma.publishJob.findUnique({
       where: { id: jobId },
-      select: { productId: true },
+      select: { productId: true, operation: true },
     });
     if (requestedJob?.productId) {
       const requestedProduct = await prisma.product.findUnique({
@@ -305,6 +316,7 @@ async function processPublishJob(
         },
       });
       const isInSnapshot = products.some((item) => item.id === requestedJob.productId);
+      expectedProductPresent = requestedProduct ? requestedProduct.visibility !== "HIDDEN" : null;
       if (requestedProduct && requestedProduct.visibility !== "HIDDEN" && !isInSnapshot) {
         const reason = !requestedProduct.seller.isActive
           ? "فروشگاه غیرفعال است"
@@ -350,11 +362,13 @@ async function processPublishJob(
         `chore(publish): update sellers.json [job ${jobId}]`
       );
 
+    const publicSettings = settings ? toPublicSettings(settings) : {};
+
     lastCommitSha =
       await upsertFile(
         `${PUBLIC_DATA_DIR}/settings.json`,
         JSON.stringify(
-          settings ?? {},
+          publicSettings,
           null,
           2
         ),
@@ -382,34 +396,37 @@ async function processPublishJob(
     // catalog.json is the public storefront's single source of truth.
     // It is intentionally written LAST: until this pointer is updated,
     // visitors continue seeing the previous complete snapshot.
+    const generatedAt = new Date().toISOString();
     const catalogPayload = {
-      schemaVersion: 1,
-      generatedAt: new Date().toISOString(),
-      version: createCatalogVersion({ products, sellers, settings: settings ?? {}, plans }),
+      schemaVersion: 2,
+      generatedAt,
+      version: createCatalogVersion({ products, sellers, settings: publicSettings, plans, planCategories }),
       products,
       sellers,
-      settings: settings ?? {},
+      settings: publicSettings,
       plans: plans.map((plan) => ({ id: plan.id, name: plan.name, durationDays: plan.durationDays, price: plan.price, discountPct: plan.discountPct, productLimit: plan.productLimit, storageLimitMb: plan.storageLimitMb, trafficLimitGb: plan.trafficLimitGb, categoryId: plan.categoryId, sortOrder: plan.sortOrder, features: parseJson(plan.features, {}) })),
       planCategories: planCategories.map((category) => ({ id: category.id, name: category.name, slug: category.slug, description: category.description, sortOrder: category.sortOrder, isActive: category.isActive })),
     };
 
-    lastCommitSha =
-      await upsertFile(
-        `${PUBLIC_DATA_DIR}/catalog.json`,
-        JSON.stringify(catalogPayload, null, 2),
-        `chore(publish): update atomic public catalog [job ${jobId}]`
-      );
-
-    // Contents API commits made by a GitHub token do not reliably trigger
-    // push-based workflows. Explicitly dispatch Pages after the atomic catalog
-    // pointer is committed so the public site actually rebuilds.
-    await log(jobId, "کاتالوگ ثبت شد؛ در حال راه‌اندازی Workflow ساخت سایت عمومی...");
-    await dispatchPublicSiteBuild();
-
-    await log(
-      jobId,
-      `کاتالوگ در GitHub ثبت شد و اجرای Workflow انتشار سایت پذیرفته شد. آخرین commit: ${lastCommitSha}`
+    lastCommitSha = await upsertFile(
+      `${PUBLIC_DATA_DIR}/catalog.json`,
+      JSON.stringify(catalogPayload, null, 2),
+      `chore(publish): update atomic public catalog [job ${jobId}]`,
     );
+
+    await log(jobId, `کاتالوگ ثبت شد (${catalogPayload.version})؛ در حال ساخت سایت عمومی...`);
+    await dispatchPublicSiteBuildAndWait(lastCommitSha);
+    await verifyPublicDeployment(
+      catalogPayload.version,
+      requestedJob?.productId && expectedProductPresent !== null ? { id: requestedJob.productId, shouldBePresent: expectedProductPresent } : undefined,
+    );
+    publicDeploymentVerified = true;
+    verifiedProductId = requestedJob?.productId ?? null;
+    verifiedOperation = requestedJob?.operation ?? null;
+    verifiedExpectedProductPresent = expectedProductPresent;
+    verifiedSnapshotCapturedAt = snapshotCapturedAt;
+
+    await log(jobId, `کاتالوگ روی دامنه عمومی با موفقیت تأیید شد. commit: ${lastCommitSha}`);
 
     const completedJob =
       await prisma.publishJob.findUnique({
@@ -422,53 +439,33 @@ async function processPublishJob(
           productId: true,
           sellerId: true,
           triggeredById: true,
+          operation: true,
         },
       });
 
     /*
-     * Only mark the triggering product as PUBLISHED after the
-     * complete public snapshot has been successfully generated.
-     *
-     * A product explicitly hidden by the user must never be
-     * silently changed back to PUBLISHED.
+     * Finalize only when the product still represents the same publish intent
+     * captured in this snapshot. An edit or a new opposite operation during
+     * deployment must not be overwritten by an old job.
      */
-    if (
-      completedJob?.productId
-    ) {
-      const product =
-        await prisma.product.findUnique({
-          where: {
-            id:
-              completedJob.productId,
-          },
+    if (completedJob?.productId && expectedProductPresent !== null) {
+      const product = await prisma.product.findUnique({
+        where: { id: completedJob.productId },
+        select: { id: true, visibility: true, hasUnpublishedChanges: true, updatedAt: true },
+      });
 
-          select: {
-            id: true,
-            visibility: true,
-          },
-        });
-
-      if (
-        product &&
-        product.visibility !==
-          "HIDDEN"
-      ) {
-        await prisma.product.update({
-          where: {
-            id: product.id,
-          },
-
-          data: {
-            visibility:
-              "PUBLISHED",
-
-            hasUnpublishedChanges:
-              false,
-
-            publishedAt:
-              new Date(),
-          },
-        });
+      if (product && product.updatedAt <= snapshotCapturedAt) {
+        if (completedJob.operation === "PUBLISH" && expectedProductPresent && product.visibility === "PUBLISHED" && product.hasUnpublishedChanges) {
+          await prisma.product.update({
+            where: { id: product.id },
+            data: { visibility: "PUBLISHED", hasUnpublishedChanges: false, publishedAt: new Date() },
+          });
+        } else if (completedJob.operation === "UNPUBLISH" && !expectedProductPresent && product.visibility === "HIDDEN") {
+          await prisma.product.update({
+            where: { id: product.id },
+            data: { hasUnpublishedChanges: false },
+          });
+        }
       }
     }
 
@@ -506,7 +503,11 @@ async function processPublishJob(
               completedJob.productId,
 
             action:
-              "PRODUCT_PUBLISHED",
+              completedJob.operation === "UNPUBLISH"
+                ? "PRODUCT_UNPUBLISHED"
+                : completedJob.operation === "REBUILD"
+                  ? "PUBLIC_CATALOG_REBUILT"
+                  : "PRODUCT_PUBLISHED",
 
             entity:
               "PublishJob",
@@ -521,6 +522,8 @@ async function processPublishJob(
 
                 publishedAt:
                   new Date().toISOString(),
+                operation:
+                  completedJob.operation,
               }),
           },
         });
@@ -557,34 +560,85 @@ async function processPublishJob(
     );
 
     try {
+      // Once the exact public deployment has been verified, do not leave the
+      // database in a false FAILED state just because the local finalization
+      // step hit a transient DB error. Retry the idempotent product/job
+      // finalization a few times. The public deployment remains the source of
+      // truth for what visitors can see, while DB state is reconciled back to it.
+      if (publicDeploymentVerified) {
+        let reconciled = false;
+        for (let attempt = 0; attempt < 3 && !reconciled; attempt += 1) {
+          try {
+            if (verifiedProductId && verifiedExpectedProductPresent !== null && verifiedSnapshotCapturedAt) {
+              const product = await prisma.product.findUnique({
+                where: { id: verifiedProductId },
+                select: { id: true, visibility: true, hasUnpublishedChanges: true, updatedAt: true },
+              });
+              if (product && product.updatedAt <= verifiedSnapshotCapturedAt) {
+                if (verifiedOperation === "PUBLISH" && verifiedExpectedProductPresent && product.visibility === "PUBLISHED" && product.hasUnpublishedChanges) {
+                  await prisma.product.update({ where: { id: product.id }, data: { visibility: "PUBLISHED", hasUnpublishedChanges: false, publishedAt: new Date() } });
+                } else if (verifiedOperation === "UNPUBLISH" && !verifiedExpectedProductPresent && product.visibility === "HIDDEN") {
+                  await prisma.product.update({ where: { id: product.id }, data: { hasUnpublishedChanges: false } });
+                }
+              }
+            }
+            await prisma.publishJob.update({
+              where: { id: jobId },
+              data: { status: "SUCCESS", commitSha: await getExistingCommitSha(jobId), finishedAt: new Date(), errorMessage: null },
+            });
+            reconciled = true;
+          } catch (reconcileError) {
+            logger.warn({ err: reconcileError, jobId, attempt: attempt + 1 }, "post-deploy database reconciliation retry failed");
+            if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 750 * (attempt + 1)));
+          }
+        }
+        if (reconciled) return;
+        message = `سایت عمومی با موفقیت منتشر شد، اما همگام‌سازی نهایی پایگاه‌داده در این لحظه انجام نشد: ${message}`;
+      }
+
       await prisma.publishJob.update({
-        where: {
-          id: jobId,
-        },
-
-        data: {
-          status:
-            "FAILED",
-
-          errorMessage:
-            message,
-
-          finishedAt:
-            new Date(),
-        },
+        where: { id: jobId },
+        data: { status: "FAILED", errorMessage: message, finishedAt: new Date() },
       });
     } catch (updateError) {
-      logger.error(
-        {
-          err:
-            updateError,
-
-          jobId,
-        },
-        "failed to mark publish job as FAILED"
-      );
+      logger.error({ err: updateError, jobId }, "failed to mark publish job as FAILED");
     }
   }
+}
+
+function toPublicSettings(settings: {
+  platformName: string;
+  logoUrl: string | null;
+  faviconUrl: string | null;
+  colorPrimary: string;
+  colorSecondary: string;
+  colorAccent: string;
+  colorBackground: string;
+  colorText: string;
+  fontFamily: string;
+  socialLinks: string | null;
+  contactEmail: string | null;
+  contactPhone: string | null;
+}) {
+  return {
+    platformName: settings.platformName,
+    logoUrl: settings.logoUrl,
+    faviconUrl: settings.faviconUrl,
+    colorPrimary: settings.colorPrimary,
+    colorSecondary: settings.colorSecondary,
+    colorAccent: settings.colorAccent,
+    colorBackground: settings.colorBackground,
+    colorText: settings.colorText,
+    fontFamily: settings.fontFamily,
+    socialLinks: parseJson(settings.socialLinks, {}),
+    contactEmail: settings.contactEmail,
+    contactPhone: settings.contactPhone,
+  };
+}
+
+async function getExistingCommitSha(jobId: string): Promise<string | null> {
+  const job = await prisma.publishJob.findUnique({ where: { id: jobId }, select: { commitSha: true } });
+  return job?.commitSha ?? null;
 }
 
 function createCatalogVersion(payload: unknown): string {
@@ -773,8 +827,7 @@ async function getPublicProducts(
       const images =
         product.images.map(
           (image) => ({
-            url:
-              image.url,
+            url: image.storageKey ? publicAssetProxyUrl(image.storageKey) : image.url,
 
             isPrimary:
               image.isPrimary,
@@ -787,8 +840,7 @@ async function getPublicProducts(
             kind:
               model.kind,
 
-            url:
-              model.url,
+            url: model.storageKey ? publicAssetProxyUrl(model.storageKey) : model.url,
           })
         );
 
@@ -975,12 +1027,17 @@ async function getPublicSellers() {
 
 
 function publicAssetProxyUrl(storageKey: string): string {
+  const apiBase = (env.API_URL || "http://localhost:4000").replace(/\/+$/, "");
+  const packageRef = parsePackageStorageKey(storageKey);
+  if (packageRef) {
+    const packagePath = packageAssetUrl(packageRef.productId, packageRef.kind, packageRef.name);
+    return `${apiBase}${packagePath}`;
+  }
   const encoded = storageKey
     .split("/")
     .filter(Boolean)
     .map((part) => encodeURIComponent(part))
     .join("/");
-  const apiBase = (env.API_URL || "http://localhost:4000").replace(/\/+$/, "");
   return `${apiBase}/api/public/assets/${encoded}`;
 }
 
@@ -1022,19 +1079,15 @@ export async function republishForSeller(
     );
   }
 
-  const job =
-    await prisma.publishJob.create({
-      data: {
-        sellerId:
-          seller.id,
+  const existing = await prisma.publishJob.findFirst({
+    where: { sellerId: seller.id, productId: null, status: { in: ["QUEUED", "PROCESSING"] } },
+    orderBy: { requestedAt: "desc" },
+  });
+  if (existing) return existing;
 
-        triggeredById:
-          triggeredByUserId,
-
-        status:
-          "QUEUED",
-      },
-    });
+  const job = await prisma.publishJob.create({
+    data: { sellerId: seller.id, triggeredById: triggeredByUserId, status: "QUEUED", operation: "REBUILD" },
+  });
 
   publishQueue.enqueue(() =>
     processPublishJob(job.id)
@@ -1063,6 +1116,55 @@ export async function republishForAllSellers(
       republishForSeller(seller.id, triggeredByUserId)
     )
   );
+}
+
+/**
+ * Recover jobs left behind by a backend restart/deploy. Only one worker can
+ * claim a QUEUED job, so re-enqueueing is safe even if multiple instances
+ * perform recovery at the same time.
+ */
+export async function recoverPendingPublishJobs() {
+  // Only recover jobs that are old enough to plausibly belong to a dead
+  // worker. Never reset a freshly-running job from another backend instance.
+  const staleAfterMs = Math.max(env.PUBLIC_PUBLISH_TIMEOUT_MS + 120_000, 15 * 60 * 1000);
+  const staleBefore = new Date(Date.now() - staleAfterMs);
+
+  await prisma.publishJob.updateMany({
+    where: {
+      status: "PROCESSING",
+      OR: [
+        { startedAt: null },
+        { startedAt: { lt: staleBefore } },
+      ],
+    },
+    data: { status: "QUEUED", startedAt: null },
+  });
+
+  const jobs = await prisma.publishJob.findMany({
+    where: { status: "QUEUED" },
+    orderBy: { requestedAt: "asc" },
+    select: { id: true },
+  });
+
+  for (const job of jobs) {
+    publishQueue.enqueue(() => processPublishJob(job.id));
+  }
+
+  return jobs.length;
+}
+
+/** Fire-and-forget wrapper for non-request lifecycle events. */
+export function queueRepublishForSeller(sellerId: string, triggeredByUserId: string) {
+  void republishForSeller(sellerId, triggeredByUserId).catch((error) => {
+    logger.error({ err: error, sellerId }, "failed to queue seller public republish");
+  });
+}
+
+/** Fire-and-forget wrapper for platform-wide lifecycle events. */
+export function queueRepublishForAllSellers(triggeredByUserId: string) {
+  void republishForAllSellers(triggeredByUserId).catch((error) => {
+    logger.error({ err: error }, "failed to queue platform public republish");
+  });
 }
 
 /**

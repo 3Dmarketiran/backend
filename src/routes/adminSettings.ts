@@ -3,18 +3,49 @@ import { z } from "zod";
 import { prisma } from "../config/prisma";
 import { requireAuth } from "../middleware/auth";
 import { requireAdmin } from "../middleware/rbac";
+import { HttpError } from "../middleware/errorHandler";
 import { env } from "../config/env";
 import { testConnection as testGithubConnection } from "../services/githubService";
 import { parseJson, serializeJson } from "../utils/json";
 
 export const adminSettingsRouter = Router();
 
+function toPublicBranding(settings: {
+  platformName: string;
+  logoUrl: string | null;
+  faviconUrl: string | null;
+  colorPrimary: string;
+  colorSecondary: string;
+  colorAccent: string;
+  colorBackground: string;
+  colorText: string;
+  fontFamily: string;
+  socialLinks: string | null;
+  contactEmail: string | null;
+  contactPhone: string | null;
+}) {
+  return {
+    platformName: settings.platformName,
+    logoUrl: settings.logoUrl,
+    faviconUrl: settings.faviconUrl,
+    colorPrimary: settings.colorPrimary,
+    colorSecondary: settings.colorSecondary,
+    colorAccent: settings.colorAccent,
+    colorBackground: settings.colorBackground,
+    colorText: settings.colorText,
+    fontFamily: settings.fontFamily,
+    socialLinks: parseJson(settings.socialLinks, {}),
+    contactEmail: settings.contactEmail,
+    contactPhone: settings.contactPhone,
+  };
+}
+
 // Public: the public website reads branding to theme itself (colors, logo,
 // platform name) — none of this is sensitive.
 adminSettingsRouter.get("/branding", async (_req, res, next) => {
   try {
     const settings = await prisma.platformSetting.findUnique({ where: { id: "singleton" } });
-    res.json({ settings: settings ? { ...settings, socialLinks: parseJson(settings.socialLinks, {}) } : null });
+    res.json({ settings: settings ? toPublicBranding(settings) : null });
   } catch (err) {
     next(err);
   }
@@ -44,7 +75,7 @@ adminSettingsRouter.put("/branding", requireAuth, requireAdmin, async (req, res,
       data: { actorId: req.user!.id, action: "PLATFORM_SETTINGS_UPDATED", entity: "PlatformSetting", entityId: "singleton" },
     });
 
-    res.json({ settings: { ...settings, socialLinks: parseJson(settings.socialLinks, {}) } });
+    res.json({ settings: toPublicBranding(settings) });
   } catch (err) {
     next(err);
   }
@@ -57,8 +88,6 @@ adminSettingsRouter.put("/branding", requireAuth, requireAdmin, async (req, res,
 
 adminSettingsRouter.get("/github/status", requireAuth, requireAdmin, async (_req, res, next) => {
   try {
-    const settings = await prisma.platformSetting.findUnique({ where: { id: "singleton" } });
-
     const lastSuccess = await prisma.publishJob.findFirst({
       where: { status: "SUCCESS" },
       orderBy: { finishedAt: "desc" },
@@ -70,9 +99,9 @@ adminSettingsRouter.get("/github/status", requireAuth, requireAdmin, async (_req
 
     res.json({
       connected: Boolean(env.GITHUB_TOKEN && env.GITHUB_OWNER && env.GITHUB_REPOSITORY),
-      owner: settings?.githubOwner ?? env.GITHUB_OWNER ?? null,
-      repository: settings?.githubRepository ?? env.GITHUB_REPOSITORY ?? null,
-      branch: settings?.githubBranch ?? env.GITHUB_BRANCH,
+      owner: env.GITHUB_OWNER ?? null,
+      repository: env.GITHUB_REPOSITORY ?? null,
+      branch: env.GITHUB_BRANCH,
       lastSuccessfulPublish: lastSuccess
         ? { at: lastSuccess.finishedAt, commitSha: lastSuccess.commitSha }
         : null,
@@ -86,28 +115,11 @@ adminSettingsRouter.get("/github/status", requireAuth, requireAdmin, async (_req
   }
 });
 
-const githubConfigSchema = z.object({
-  githubOwner: z.string().min(1).optional(),
-  githubRepository: z.string().min(1).optional(),
-  githubBranch: z.string().min(1).optional(),
-});
-
-// Admin can set owner/repo/branch (non-secret metadata); the actual TOKEN
-// is only ever set via the server's environment variable, never through
-// this or any other HTTP endpoint.
-adminSettingsRouter.put("/github/config", requireAuth, requireAdmin, async (req, res, next) => {
-  try {
-    const input = githubConfigSchema.parse(req.body);
-    const settings = await prisma.platformSetting.update({ where: { id: "singleton" }, data: input });
-
-    await prisma.auditLog.create({
-      data: { actorId: req.user!.id, action: "GITHUB_CONFIG_CHANGED", entity: "PlatformSetting", entityId: "singleton", metadata: serializeJson(input) },
-    });
-
-    res.json({ settings: { ...settings, socialLinks: parseJson(settings.socialLinks, {}) } });
-  } catch (err) {
-    next(err);
-  }
+// Runtime GitHub destination is intentionally immutable from HTTP.
+// The actual owner/repository/branch come from server environment variables.
+// Keep the endpoint only as a compatibility response for older clients.
+adminSettingsRouter.put("/github/config", requireAuth, requireAdmin, async (_req, _res, next) => {
+  next(new HttpError(405, "مقصد انتشار GitHub فقط از متغیرهای محیطی Backend تنظیم می‌شود."));
 });
 
 // "Test connection" button (spec section 45) — makes a real, read-only call

@@ -82,3 +82,16 @@ export const loginRateLimiter = rateLimit({
         // Development still uses the configured limits.
       }),
 });
+
+
+/** Public catalog/assets limiter — high enough for normal storefront traffic,
+ * independent from authenticated admin/seller API quotas. */
+export const publicApiRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: isProduction ? 300 : 1000,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  handler: (_req, res) => {
+    res.status(429).json({ error: "TOO_MANY_REQUESTS", message: "تعداد درخواست‌ها بیش از حد مجاز است." });
+  },
+});

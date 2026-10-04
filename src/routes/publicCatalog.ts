@@ -5,6 +5,7 @@ import { storage } from "../storage";
 import { HttpError } from "../middleware/errorHandler";
 import { readPackageAsset, getPackageContentType, parsePackageStorageKey, packageAssetUrl } from "../services/productPackageService";
 import { reserveTrafficOrThrow } from "../services/trafficService";
+import { logger } from "../utils/logger";
 
 export const publicCatalogRouter = Router();
 
@@ -93,10 +94,15 @@ publicCatalogRouter.get("/assets/*", async (req, res, next) => {
             },
           },
         },
-        select: { id: true, sellerId: true },
+        select: {
+          id: true,
+          sellerId: true,
+          images: { where: { storageKey: key }, select: { id: true } },
+          models: { where: { storageKey: key }, select: { id: true } },
+        },
       });
 
-      if (!product) {
+      if (!product || (product.images.length === 0 && product.models.length === 0)) {
         throw new HttpError(404, "فایل محصول منتشرشده پیدا نشد.");
       }
     } else if (resource === "sellers") {
@@ -117,10 +123,10 @@ publicCatalogRouter.get("/assets/*", async (req, res, next) => {
             },
           },
         },
-        select: { id: true },
+        select: { id: true, logoStorageKey: true },
       });
 
-      if (!seller) {
+      if (!seller || seller.logoStorageKey !== key) {
         throw new HttpError(404, "لوگوی فروشگاه پیدا نشد.");
       }
     } else {
@@ -346,7 +352,7 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
       slug: seller.slug,
       storeName: seller.storeName,
       description: seller.description,
-      logoUrl: seller.logoUrl
+      logoUrl: (seller.logoStorageKey || seller.logoUrl)
         ? await publicLogoUrl(req, seller.slug, seller.logoUrl, seller.logoStorageKey)
         : null,
       themeColor: seller.themeColor,
@@ -363,7 +369,7 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
       version: `live-${Date.now()}`,
       products: publicProducts,
       sellers: publicSellers,
-      settings: settings ?? {},
+      settings: settings ? toPublicSettings(settings) : {},
       plans: plans.map((plan) => ({
         id: plan.id,
         name: plan.name,
@@ -392,6 +398,37 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
 });
 
 
+function toPublicSettings(settings: {
+  platformName: string;
+  logoUrl: string | null;
+  faviconUrl: string | null;
+  colorPrimary: string;
+  colorSecondary: string;
+  colorAccent: string;
+  colorBackground: string;
+  colorText: string;
+  fontFamily: string;
+  socialLinks: string | null;
+  contactEmail: string | null;
+  contactPhone: string | null;
+}) {
+  return {
+    platformName: settings.platformName,
+    logoUrl: settings.logoUrl,
+    faviconUrl: settings.faviconUrl,
+    colorPrimary: settings.colorPrimary,
+    colorSecondary: settings.colorSecondary,
+    colorAccent: settings.colorAccent,
+    colorBackground: settings.colorBackground,
+    colorText: settings.colorText,
+    fontFamily: settings.fontFamily,
+    socialLinks: parseJson(settings.socialLinks, {}),
+    contactEmail: settings.contactEmail,
+    contactPhone: settings.contactPhone,
+  };
+}
+
+
 async function resolveCatalogAssetUrl(
   req: { protocol: string; get(name: string): string | undefined },
   storageKey: string,
@@ -415,20 +452,20 @@ async function resolveCatalogAssetUrl(
 async function publicLogoUrl(
   req: { protocol: string; get(name: string): string | undefined },
   sellerSlug: string,
-  logoUrl: string,
+  logoUrl: string | null | undefined,
   logoStorageKey: string | null | undefined,
-): Promise<string> {
+): Promise<string | null> {
   // Always expose the logo through our backend public-asset route. This avoids
   // leaking provider-specific URLs and guarantees the browser gets consistent
   // CORS/MIME/cache behavior even when the underlying storage provider changes.
   const storageKey = logoStorageKey || extractStorageKey(logoUrl) || extractLegacyPublicStorageKey(logoUrl);
   if (storageKey) return absolutePublicAssetUrl(req, storageKey);
 
-  // Legacy rows that predate logoStorageKey are still served by the public
-  // slug endpoint, which can redirect to the original provider URL if needed.
-  const host = req.get("host");
-  if (!host) throw new HttpError(500, "آدرس عمومی Backend تنظیم نشده است.");
-  return `${req.protocol}://${host}/api/sellers/by-slug/${encodeURIComponent(sellerSlug)}/logo`;
+  // Legacy rows that predate logoStorageKey: only return a pre-existing
+  // absolute HTTPS URL. Never invent a fallback route that may not exist.
+  if (/^https:\/\//i.test(logoUrl)) return logoUrl;
+  logger.warn({ sellerSlug }, "public seller logo could not be resolved; catalog will continue without logo");
+  return null;
 }
 
 

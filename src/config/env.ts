@@ -84,6 +84,8 @@ const envSchema = z
 
     PUBLIC_SITE_URL: optionalUrl,
 
+    PUBLIC_PUBLISH_TIMEOUT_MS: z.coerce.number().int().positive().default(5 * 60 * 1000),
+
     PUBLIC_ASSET_BASE_URL: optionalUrl,
 
     PUBLISH_ASSETS_TO_GITHUB: booleanFromEnv.default(true),

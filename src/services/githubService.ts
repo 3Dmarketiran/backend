@@ -164,29 +164,172 @@ async function readGitHubError(
  * workflow_dispatch avoids that silent no-build condition.
  * The token therefore needs Actions: write in addition to Contents: read/write.
  */
-export async function dispatchPublicSiteBuild(): Promise<void> {
-  assertConfigured();
+type GitHubWorkflowRun = {
+  id: number;
+  status: string | null;
+  conclusion: string | null;
+  head_sha: string;
+  html_url?: string;
+};
 
-  const workflowPath = "deploy.yml";
-  const url = `${repositoryBaseUrl()}/actions/workflows/${workflowPath}/dispatches`;
+async function listWorkflowRuns(workflowPath: string): Promise<GitHubWorkflowRun[]> {
+  assertConfigured();
+  const url = `${repositoryBaseUrl()}/actions/workflows/${encodeURIComponent(workflowPath)}/runs?event=workflow_dispatch&branch=${encodeURIComponent(env.GITHUB_BRANCH)}&per_page=25`;
   const response = await fetch(url, {
+    headers: authHeaders(),
+    signal: createAbortSignal(),
+  });
+  if (!response.ok) {
+    const details = await readGitHubError(response);
+    throw new HttpError(502, `دریافت وضعیت Workflow سایت عمومی ناموفق بود (${response.status}).${details ? ` جزئیات: ${details}` : ""}`);
+  }
+  const data = (await response.json()) as { workflow_runs?: GitHubWorkflowRun[] };
+  return data.workflow_runs ?? [];
+}
+
+async function getWorkflowRun(runId: number): Promise<GitHubWorkflowRun> {
+  assertConfigured();
+  const response = await fetch(`${repositoryBaseUrl()}/actions/runs/${runId}`, {
+    headers: authHeaders(),
+    signal: createAbortSignal(),
+  });
+  if (!response.ok) {
+    const details = await readGitHubError(response);
+    throw new HttpError(502, `دریافت وضعیت اجرای Workflow ناموفق بود (${response.status}).${details ? ` جزئیات: ${details}` : ""}`);
+  }
+  return (await response.json()) as GitHubWorkflowRun;
+}
+
+/**
+ * Dispatch the public Pages workflow and wait for the run attached to the
+ * exact catalog commit. A 204 from workflow_dispatch is NOT treated as a
+ * publish success; success is returned only after the selected run completes.
+ */
+export async function dispatchPublicSiteBuildAndWait(
+  expectedCommitSha: string,
+  timeoutMs = env.PUBLIC_PUBLISH_TIMEOUT_MS,
+): Promise<GitHubWorkflowRun> {
+  assertConfigured();
+  const workflowPath = "deploy.yml";
+  const dispatchUrl = `${repositoryBaseUrl()}/actions/workflows/${workflowPath}/dispatches`;
+  const response = await fetch(dispatchUrl, {
     method: "POST",
-    headers: {
-      ...authHeaders(),
-      "Content-Type": "application/json",
-    },
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
     signal: createAbortSignal(),
     body: JSON.stringify({ ref: env.GITHUB_BRANCH }),
   });
 
-  if (response.status !== 204) {
+  if (![200, 204].includes(response.status)) {
     const details = await readGitHubError(response);
     throw new HttpError(
       502,
-      `داده‌های کاتالوگ در GitHub ثبت شدند، اما اجرای Build سایت شروع نشد (${response.status}). ` +
-        `دسترسی Actions: write، وجود فایل .github/workflows/${workflowPath} و نام ریپو را بررسی کنید.` +
-        (details ? ` جزئیات: ${details}` : "")
+      `اجرای Build سایت عمومی شروع نشد (${response.status}). دسترسی Actions: write و Workflow deploy.yml را بررسی کنید.${details ? ` جزئیات: ${details}` : ""}`,
     );
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  let matchingRun: GitHubWorkflowRun | null = null;
+
+  while (Date.now() < deadline) {
+    const runs = await listWorkflowRuns(workflowPath);
+    matchingRun = runs.find((run) => run.head_sha === expectedCommitSha) ?? null;
+
+    if (matchingRun) {
+      if (matchingRun.status === "completed") {
+        if (matchingRun.conclusion !== "success") {
+          throw new HttpError(502, `Workflow سایت عمومی برای commit ${expectedCommitSha.slice(0, 8)} موفق نبود (نتیجه: ${matchingRun.conclusion ?? "unknown"}).`);
+        }
+        return matchingRun;
+      }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  }
+
+  throw new HttpError(
+    504,
+    matchingRun
+      ? "Build سایت عمومی در مهلت تعیین‌شده تمام نشد. انتشار موفق ثبت نشد."
+      : "اجرای Workflow متناظر با commit کاتالوگ پیدا نشد. انتشار موفق ثبت نشد.",
+  );
+}
+
+/**
+ * Verify that the deployed public site serves the exact catalog version that
+ * the publish job generated. This closes the gap between GitHub commit
+ * success and actual visitor visibility on GitHub Pages/custom domain.
+ */
+export async function verifyPublicDeployment(
+  expectedCatalogVersion: string,
+  expectedProduct?: { id: string; shouldBePresent: boolean },
+  timeoutMs = env.PUBLIC_PUBLISH_TIMEOUT_MS,
+): Promise<void> {
+  if (!env.PUBLIC_SITE_URL) {
+    throw new HttpError(503, "PUBLIC_SITE_URL برای تأیید انتشار سایت عمومی تنظیم نشده است.");
+  }
+
+  const base = env.PUBLIC_SITE_URL.replace(/\/+$/, "");
+  const deadline = Date.now() + Math.min(timeoutMs, 120_000);
+  let lastReason = "";
+
+  while (Date.now() < deadline) {
+    try {
+      const url = `${base}/public-data/catalog.json?verify=${encodeURIComponent(expectedCatalogVersion)}`;
+      const response = await fetch(url, {
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+        signal: createAbortSignal(10_000),
+      });
+      if (!response.ok) {
+        lastReason = `HTTP ${response.status}`;
+      } else {
+        const data = (await response.json()) as {
+          schemaVersion?: number;
+          version?: string;
+          generatedAt?: string;
+          products?: Array<{ id?: string }>;
+          sellers?: unknown[];
+          settings?: unknown;
+        };
+        if (data.schemaVersion !== 2 || !Array.isArray(data.products) || !Array.isArray(data.sellers) || !data.settings) {
+          lastReason = "catalog schema/structure نامعتبر است";
+        } else if (data.version !== expectedCatalogVersion) {
+          lastReason = `catalog version فعلی ${data.version ?? "unknown"} است`;
+        } else if (expectedProduct) {
+          const present = data.products.some((product) => product.id === expectedProduct.id);
+          if (present !== expectedProduct.shouldBePresent) {
+            lastReason = expectedProduct.shouldBePresent ? "محصول مورد انتظار هنوز روی سایت عمومی دیده نمی‌شود" : "محصولی که باید حذف می‌شد هنوز در کاتالوگ عمومی است";
+          } else {
+            return;
+          }
+        } else {
+          return;
+        }
+      }
+    } catch (error) {
+      lastReason = error instanceof Error ? error.message : "خطای ناشناخته";
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  }
+
+  throw new HttpError(504, `تأیید انتشار روی دامنه عمومی در مهلت تعیین‌شده انجام نشد: ${lastReason}`);
+}
+
+// Backward-compatible wrapper for callers that only need dispatch semantics.
+export async function dispatchPublicSiteBuild(): Promise<void> {
+  assertConfigured();
+  const workflowPath = "deploy.yml";
+  const url = `${repositoryBaseUrl()}/actions/workflows/${workflowPath}/dispatches`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    signal: createAbortSignal(),
+    body: JSON.stringify({ ref: env.GITHUB_BRANCH }),
+  });
+  if (![200, 204].includes(response.status)) {
+    const details = await readGitHubError(response);
+    throw new HttpError(502, `اجرای Build سایت عمومی شروع نشد (${response.status}).${details ? ` جزئیات: ${details}` : ""}`);
   }
 }
 

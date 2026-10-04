@@ -15,7 +15,7 @@ import {
   serializeJson,
 } from "../utils/json";
 import { storage } from "../storage";
-import { republishForSeller } from "../services/publishService";
+import { queueRepublishForSeller } from "../services/publishService";
 import { reserveTrafficOrThrow } from "../services/trafficService";
 
 export const sellersRouter = Router();
@@ -137,7 +137,9 @@ sellersRouter.get(
           slug: seller.slug,
           storeName: seller.storeName,
           description: seller.description,
-          logoUrl: seller.logoUrl,
+          logoUrl: seller.logoStorageKey
+            ? `${req.protocol}://${req.get("host")}/api/public/assets/${seller.logoStorageKey.split("/").filter(Boolean).map((part) => encodeURIComponent(part)).join("/")}`
+            : seller.logoUrl,
           contactEmail:
             seller.contactEmail,
           contactPhone:
@@ -425,8 +427,19 @@ sellersRouter.get(
 
       res.json({
         seller: {
-          ...seller,
-          category: seller.sellerCategory,
+          id: seller.id,
+          slug: seller.slug,
+          storeName: seller.storeName,
+          description: seller.description,
+          logoUrl: seller.logoStorageKey
+            ? `${req.protocol}://${req.get("host")}/api/public/assets/${seller.logoStorageKey.split("/").map(encodeURIComponent).join("/")}`
+            : seller.logoUrl,
+          contactEmail: seller.contactEmail,
+          contactPhone: seller.contactPhone,
+          address: seller.address,
+          category: seller.sellerCategory
+            ? { slug: seller.sellerCategory.slug, name: seller.sellerCategory.name }
+            : null,
           socialLinks: parseJson(seller.socialLinks, {}),
         },
       });
@@ -447,12 +460,24 @@ sellersRouter.get(
       const slug = req.params.slug.trim();
       if (!slug) throw new HttpError(400, "شناسه فروشگاه نامعتبر است.");
 
-      const seller = await prisma.seller.findUnique({
-        where: { slug },
-        select: { id: true, logoUrl: true, logoStorageKey: true, isActive: true },
+      const now = new Date();
+      const seller = await prisma.seller.findFirst({
+        where: {
+          slug,
+          isActive: true,
+          subscriptions: {
+            some: {
+              status: "ACTIVE",
+              startDate: { lte: now },
+              endDate: { gte: now },
+              plan: { is: { isActive: true } },
+            },
+          },
+        },
+        select: { id: true, logoUrl: true, logoStorageKey: true },
       });
 
-      if (!seller?.isActive || !seller.logoUrl) {
+      if (!seller || (!seller.logoUrl && !seller.logoStorageKey)) {
         return res.status(404).end();
       }
 
@@ -788,7 +813,7 @@ sellersRouter.put(
         },
       });
 
-      void republishForSeller(sellerId, req.user!.id);
+      queueRepublishForSeller(sellerId, req.user!.id);
 
       res.json({
         seller: {
@@ -968,7 +993,7 @@ sellersRouter.post(
       newStorageKey =
         undefined;
 
-      void republishForSeller(seller.id, req.user!.id);
+      queueRepublishForSeller(seller.id, req.user!.id);
 
       res.status(201).json({
         seller: {

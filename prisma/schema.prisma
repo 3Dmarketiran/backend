@@ -368,6 +368,10 @@ model PublishJob {
   triggeredBy   User @relation("TriggeredByUser", fields: [triggeredById], references: [id])
 
   status       String  @default("QUEUED")
+  // Exact intent of this job: PUBLISH, UNPUBLISH, or REBUILD.
+  // This is persisted so the UI and audit trail never have to infer intent
+  // from the product visibility alone.
+  operation    String  @default("PUBLISH")
   commitSha    String?
   errorMessage String?
 
