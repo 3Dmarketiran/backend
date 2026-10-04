@@ -1,5 +1,4 @@
 import { prisma } from "../config/prisma";
-import { env } from "../config/env";
 import {
   upsertFile,
   deleteFile,
@@ -273,6 +272,46 @@ async function processPublishJob(
       jobId,
       `تولید داده استاتیک: ${products.length} محصول و ${sellers.length} فروشنده.`
     );
+
+    // Never report a successful publish if the requested product was filtered
+    // out of the public snapshot. This turns a silent storefront disappearance
+    // into an actionable failed job instead of a misleading success state.
+    const requestedJob = await prisma.publishJob.findUnique({
+      where: { id: jobId },
+      select: { productId: true },
+    });
+    if (requestedJob?.productId) {
+      const requestedProduct = await prisma.product.findUnique({
+        where: { id: requestedJob.productId },
+        select: {
+          id: true,
+          slug: true,
+          visibility: true,
+          hasUnpublishedChanges: true,
+          seller: {
+            select: {
+              isActive: true,
+              subscriptions: {
+                where: { status: "ACTIVE", startDate: { lte: now }, endDate: { gte: now }, plan: { is: { isActive: true } } },
+                select: { id: true },
+                take: 1,
+              },
+            },
+          },
+        },
+      });
+      const isInSnapshot = products.some((item) => item.id === requestedJob.productId);
+      if (requestedProduct && requestedProduct.visibility !== "HIDDEN" && !isInSnapshot) {
+        const reason = !requestedProduct.seller.isActive
+          ? "فروشگاه غیرفعال است"
+          : requestedProduct.seller.subscriptions.length === 0
+            ? "اشتراک فعال و معتبر برای فروشگاه پیدا نشد"
+            : requestedProduct.hasUnpublishedChanges
+              ? "محصول تغییرات منتشرنشده دارد و در کاتالوگ عمومی نیست"
+              : "محصول با شرایط کاتالوگ عمومی تطبیق ندارد";
+        throw new HttpError(409, `انتشار محصول ${requestedProduct.slug} کامل نشد: ${reason}. وضعیت انتشار موفق ثبت نشد.`);
+      }
+    }
 
     /*
      * The publish snapshot is intentionally written as separate
@@ -731,7 +770,7 @@ async function getPublicProducts(
         product.images.map(
           (image) => ({
             url:
-              publicAssetUrl(image.storageKey, image.url),
+              image.url,
 
             isPrimary:
               image.isPrimary,
@@ -745,7 +784,7 @@ async function getPublicProducts(
               model.kind,
 
             url:
-              publicAssetUrl(model.storageKey, model.url),
+              model.url,
           })
         );
 
@@ -931,27 +970,13 @@ async function getPublicSellers() {
 }
 
 
-function publicAssetUrl(storageKey: string | null | undefined, fallbackUrl?: string | null): string {
-  // Published snapshots are hosted on GitHub Pages, so root-relative API
-  // paths resolve against the Pages domain and break. Always publish an
-  // absolute backend URL for proxy-backed assets.
-  const backendBase = (env.API_URL || "https://threedmarketiran-backend.onrender.com").replace(/\/$/, "");
-  if (storageKey) {
-    const encoded = storageKey
-      .split("/")
-      .filter(Boolean)
-      .map((part) => encodeURIComponent(part))
-      .join("/");
-    return `${backendBase}/api/public/assets/${encoded}`;
-  }
-
-  if (fallbackUrl && /^https?:\/\//i.test(fallbackUrl)) return fallbackUrl;
-  if (fallbackUrl?.startsWith("/api/public/assets/")) return `${backendBase}${fallbackUrl}`;
-  return fallbackUrl || "";
-}
-
 function publicAssetProxyUrl(storageKey: string): string {
-  return publicAssetUrl(storageKey);
+  const encoded = storageKey
+    .split("/")
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+  return `/api/public/assets/${encoded}`;
 }
 
 
