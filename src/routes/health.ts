@@ -14,7 +14,9 @@ export const healthRouter = Router();
 // whole service is down and restart it, causing real outages for an
 // otherwise-healthy backend.
 healthRouter.get("/live", (_req, res) => {
-  res.status(200).json({ status: "ok" });
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+  res.setHeader("X-Health-Check", "live");
+  res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
 // GET /api/health — spec section 44: backend, database, storage, GitHub.
