@@ -8,7 +8,7 @@ This migration is deliberately **one-way**:
 - Data is sent to the D1 `/import` Worker in batches of at most 100 rows.
 - `_prisma_migrations` is not migrated.
 - R2/object storage is not migrated by this script.
-- Running the script again is safe at the row level because the D1 import Worker uses `INSERT OR REPLACE`.
+- Running the script again is safe at the row level because the D1 import Worker uses an in-place `INSERT ... ON CONFLICT (id) DO UPDATE` UPSERT. It does not use `INSERT OR REPLACE`, which could delete/reinsert parent rows and trigger `ON DELETE CASCADE`.
 
 ## 1. Configure environment variables
 
@@ -76,7 +76,9 @@ This keeps parent rows available before dependent rows.
 
 ## 4. Important note about Category
 
-`Category` has a self-referencing `parentId`. The script imports the entire Category table as rows, so parent/child category relationships keep their original IDs. D1 foreign-key enforcement must be compatible with the existing schema/import setup.
+`Category` has a self-referencing `parentId`. The migration runner therefore reads the complete Category table first and orders rows **parent-before-child** before sending them to D1. Original IDs are preserved.
+
+If legacy data contains a cycle, the runner still sends every row exactly once; D1 will reject the batch if the resulting foreign-key relationship is invalid.
 
 ## 5. Important note about storageKey
 
@@ -94,13 +96,14 @@ Actual files/objects are intentionally left for the later Supabase Storage -> R2
 
 The migration can be run again after fixing an error.
 
-The D1 Worker currently accepts a maximum of 100 rows and uses:
+The D1 Worker accepts a maximum of 100 rows and uses:
 
 ```sql
-INSERT OR REPLACE
+INSERT INTO ... VALUES (...)
+ON CONFLICT ("id") DO UPDATE SET ...
 ```
 
-so rows with the same primary key are replaced rather than duplicated.
+Rows with the same primary key are updated in place rather than deleted and re-created. This is important because the schema contains `ON DELETE CASCADE` relationships.
 
 This script itself does not attempt to delete or clean anything in either database.
 
@@ -113,3 +116,28 @@ The following are intentionally excluded:
 - R2 objects
 
 Those are separate migration phases.
+
+
+## 8. D1 Worker included in this release
+
+The repository now contains:
+
+```text
+d1-migration-worker/
+  src/index.ts
+  migrations/0001_initial_schema.sql
+  wrangler.toml
+  package.json
+  README.md
+```
+
+The schema is the final current Prisma model represented with SQLite/D1 types:
+
+- `BOOLEAN` -> `INTEGER` (`0/1`)
+- `DOUBLE PRECISION` -> `REAL`
+- `TIMESTAMP(3)` -> `TEXT` (ISO-8601 timestamps)
+- `BIGINT` -> `INTEGER`
+
+The Worker converts boolean JSON values to `0/1` during import.
+
+Cloudflare D1 enforces foreign keys, and D1 batch calls execute as transactional batches. The import endpoint uses D1 batch statements rather than a single giant multi-row statement.

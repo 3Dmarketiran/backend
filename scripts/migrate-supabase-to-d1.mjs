@@ -22,9 +22,6 @@
  *   MIGRATION_TABLES=User,Seller,Product
  *
  * Run:
- *   node scripts/migrate-supabase-to-d1.mjs
- *
- * Or:
  *   npm run migrate:supabase:d1
  */
 
@@ -52,10 +49,6 @@ const TABLE_ORDER = [
   "AnalyticsEvent",
   "AuditLog",
 ];
-
-// Intentionally excluded:
-//   _prisma_migrations
-// and any storage/R2 objects. Storage migration is a separate phase.
 
 const MAX_IMPORT_BATCH = 100;
 const batchSize = Math.min(
@@ -97,11 +90,15 @@ console.log(`Page size: ${pageSize}`);
 console.log(`Tables: ${requestedTables.join(", ")}`);
 console.log("");
 console.log("SAFETY: Supabase is accessed with GET requests only.");
+console.log("SAFETY: D1 import uses in-place UPSERT, not INSERT OR REPLACE.");
+console.log("SAFETY: Category rows are imported parent-before-child.");
 console.log("SAFETY: _prisma_migrations and object storage are excluded.");
 console.log("");
 
 for (const table of requestedTables) {
-  const count = await migrateTable(table);
+  const count = table === "Category"
+    ? await migrateCategories()
+    : await migrateTable(table);
   totalImported += count;
 }
 
@@ -129,7 +126,6 @@ async function migrateTable(table) {
 
     if (rows.length === 0) break;
 
-    // Never send more than 100 records to the D1 import endpoint.
     for (let i = 0; i < rows.length; i += batchSize) {
       const batch = rows.slice(i, i + batchSize);
       await importToD1(table, batch);
@@ -140,8 +136,6 @@ async function migrateTable(table) {
       );
     }
 
-    // A full page means there may be another page.
-    // A short page is the end.
     offset += rows.length;
     if (rows.length < pageSize) break;
   }
@@ -150,16 +144,84 @@ async function migrateTable(table) {
   return tableTotal;
 }
 
+async function migrateCategories() {
+  console.log("\n[Category] Reading all rows for parent-first import...");
+
+  const allRows = [];
+  let offset = 0;
+
+  while (true) {
+    const rows = await fetchSupabasePage("Category", offset, pageSize);
+
+    if (!Array.isArray(rows)) {
+      throw new Error("[Category] Supabase returned a non-array response.");
+    }
+
+    if (rows.length === 0) break;
+
+    allRows.push(...rows);
+    offset += rows.length;
+
+    if (rows.length < pageSize) break;
+  }
+
+  const byId = new Map(allRows.map((row) => [String(row.id), row]));
+  const children = new Map();
+
+  for (const row of allRows) {
+    if (row.parentId && byId.has(String(row.parentId))) {
+      const key = String(row.parentId);
+      if (!children.has(key)) children.set(key, []);
+      children.get(key).push(row);
+    }
+  }
+
+  const ordered = [];
+  const visited = new Set();
+
+  const visit = (row) => {
+    const id = String(row.id);
+    if (visited.has(id)) return;
+    visited.add(id);
+    ordered.push(row);
+
+    for (const child of children.get(id) || []) {
+      visit(child);
+    }
+  };
+
+  // Roots first.
+  for (const row of allRows) {
+    if (!row.parentId || !byId.has(String(row.parentId))) {
+      visit(row);
+    }
+  }
+
+  // If bad legacy data contains a cycle, do not silently lose rows.
+  for (const row of allRows) {
+    visit(row);
+  }
+
+  let tableTotal = 0;
+  for (let i = 0; i < ordered.length; i += batchSize) {
+    const batch = ordered.slice(i, i + batchSize);
+    await importToD1("Category", batch);
+    tableTotal += batch.length;
+    console.log(
+      `[Category] imported ${tableTotal} row(s) (latest batch: ${batch.length})`
+    );
+  }
+
+  console.log(`[Category] DONE — ${tableTotal} row(s)`);
+  return tableTotal;
+}
+
 async function fetchSupabasePage(table, offset, limit) {
   const url = new URL(`${supabaseUrl}/rest/v1/${encodeURIComponent(table)}`);
 
-  // Select all columns. Do not use a mutation endpoint.
   url.searchParams.set("select", "*");
   url.searchParams.set("offset", String(offset));
   url.searchParams.set("limit", String(limit));
-
-  // Stable ordering helps make repeated migrations deterministic.
-  // Most Prisma models have an id column; PlatformSetting also has id.
   url.searchParams.set("order", "id.asc");
 
   const response = await fetch(url, {
@@ -210,9 +272,7 @@ async function importToD1(table, rows) {
   try {
     result = JSON.parse(body);
   } catch {
-    throw new Error(
-      `[${table}] D1 import returned invalid JSON:\n${body}`
-    );
+    throw new Error(`[${table}] D1 import returned invalid JSON:\n${body}`);
   }
 
   if (!result.ok) {
