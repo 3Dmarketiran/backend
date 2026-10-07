@@ -13,6 +13,7 @@ import pinoHttp from "pino-http";
 import { rateLimit } from "express-rate-limit";
 
 import { env, isProduction } from "./config/env";
+import { repairD1DateTimes } from "./config/d1DateTimeRepair";
 import { prisma } from "./config/prisma";
 import { attachUser } from "./middleware/auth";
 import { csrfProtection } from "./middleware/csrf";
@@ -298,20 +299,39 @@ app.use(
 /* HTTP server                                                                */
 /* -------------------------------------------------------------------------- */
 
-const server = app.listen(PORT, () => {
-  console.log(
-    `[server] API listening on http://localhost:${PORT}`,
-  );
+let server: ReturnType<typeof app.listen> | undefined;
 
-  console.log(
-    `[server] environment=${env.NODE_ENV} storage=${env.STORAGE_PROVIDER}`,
-  );
-});
+async function startServer() {
+  // Repair legacy D1 timestamps before Prisma can read any DateTime fields.
+  // This is idempotent and preserves all existing data.
+  const repaired = await repairD1DateTimes();
 
-void recoverPendingPublishJobs().then((count) => {
-  if (count > 0) console.log(`[publish] recovered ${count} pending job(s)`);
-}).catch((error) => {
-  console.error("[publish] failed to recover pending jobs", error);
+  if (repaired > 0) {
+    console.log(`[d1] normalized ${repaired} legacy DateTime value(s) to RFC3339`);
+  } else {
+    console.log("[d1] DateTime normalization check passed");
+  }
+
+  server = app.listen(PORT, () => {
+    console.log(
+      `[server] API listening on http://localhost:${PORT}`,
+    );
+
+    console.log(
+      `[server] environment=${env.NODE_ENV} storage=${env.STORAGE_PROVIDER}`,
+    );
+  });
+
+  void recoverPendingPublishJobs().then((count) => {
+    if (count > 0) console.log(`[publish] recovered ${count} pending job(s)`);
+  }).catch((error) => {
+    console.error("[publish] failed to recover pending jobs", error);
+  });
+}
+
+void startServer().catch((error) => {
+  console.error("[startup] failed to initialize D1:", error);
+  process.exit(1);
 });
 
 /* -------------------------------------------------------------------------- */
@@ -369,6 +389,10 @@ async function shutdown(signal: string) {
   if (subscriptionInterval) {
     clearInterval(subscriptionInterval);
     subscriptionInterval = undefined;
+  }
+
+  if (!server) {
+    process.exit(1);
   }
 
   server.close(async (serverError) => {

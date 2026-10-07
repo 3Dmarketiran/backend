@@ -20,3 +20,15 @@ Runtime remains:
 - Database access from Render: Prisma D1 HTTP adapter
 - No Supabase database connection
 - No Supabase Storage -> R2 migration
+
+
+## DateTime compatibility fix
+
+A legacy D1 import can contain timezone-less ISO timestamps such as `2026-09-20T22:15:01.669`. Prisma 6.19's D1 adapter rejects these when materializing `DateTime` fields. The project now:
+
+- includes `d1/migrations/0002_normalize_datetime.sql` for normal D1 migration workflows;
+- runs the same idempotent normalization through the Cloudflare D1 HTTP API before the Render server starts, using the existing `CLOUDFLARE_D1_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and `CLOUDFLARE_DATABASE_ID` variables;
+- preserves the timestamp instant by only adding the UTC `Z` suffix to timezone-less values;
+- does not delete users, sessions, products, or any other records.
+
+Cloudflare documents the D1 query endpoint as `POST /accounts/{account_id}/d1/database/{database_id}/query` and supports D1 Write API tokens for these SQL updates. 

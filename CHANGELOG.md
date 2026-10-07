@@ -131,3 +131,8 @@ Health Check Path رو به /api/health/live تغییر بدید (نه /api/heal
 7. `env.PUBLIC_ASSET_BASE_URL` در حالت local storage می‌تونه undefined باشه (فقط در
    production الزامیه)؛ یک مقدار پیش‌فرض منطقی (`http://localhost:PORT/files`)
    برای همین حالت اضافه شد.
+
+## D1 DateTime P2023 fix — 2026-10-07
+- Normalize timezone-less SQLite/D1 DateTime values before Prisma reads them.
+- Preserve existing data; no reset or destructive migration.
+- Startup repair runs before the HTTP server accepts requests.
