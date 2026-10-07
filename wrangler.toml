@@ -1,0 +1,8 @@
+name = "3dmarketiran-d1"
+compatibility_date = "2026-10-01"
+
+# Fill these values from Cloudflare after creating the D1 database.
+[[d1_databases]]
+binding = "DB"
+database_name = "3dmarketiran"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"

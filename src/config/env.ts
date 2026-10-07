@@ -46,10 +46,16 @@ const envSchema = z
       .max(65535)
       .default(4000),
 
+    // Local Prisma CLI database path. Runtime production access uses the D1 HTTP adapter below.
     DATABASE_URL: z
       .string()
       .trim()
-      .min(1, "DATABASE_URL is required."),
+      .min(1)
+      .default("file:./prisma/dev.db"),
+
+    CLOUDFLARE_ACCOUNT_ID: z.string().trim().min(1, "CLOUDFLARE_ACCOUNT_ID is required."),
+    CLOUDFLARE_DATABASE_ID: z.string().trim().min(1, "CLOUDFLARE_DATABASE_ID is required."),
+    CLOUDFLARE_D1_TOKEN: z.string().trim().min(1, "CLOUDFLARE_D1_TOKEN is required."),
 
     SESSION_SECRET: z
       .string()

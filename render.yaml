@@ -3,16 +3,20 @@ services:
     name: threedmarketiran-backend
     env: node
     rootDir: backend
-    buildCommand: npm ci && npx prisma generate && npm run build
+    buildCommand: npm install && npm run build
     startCommand: npm start
     healthCheckPath: /api/health/live
     envVars:
+      - key: CLOUDFLARE_ACCOUNT_ID
+        sync: false
+      - key: CLOUDFLARE_DATABASE_ID
+        sync: false
+      - key: CLOUDFLARE_D1_TOKEN
+        sync: false
       - key: NODE_ENV
         value: production
       - key: PORT
         value: 10000
-      - key: DATABASE_URL
-        sync: false
       - key: SESSION_SECRET
         sync: false
       - key: GITHUB_TOKEN
