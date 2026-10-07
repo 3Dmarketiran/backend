@@ -45,12 +45,30 @@ function buildRepairSql() {
       columns.map(
         (column) => `
 UPDATE "${table}"
-SET "${column}" = "${column}" || 'Z'
+SET "${column}" = CASE
+  /* A timestamp ending in one or more Z characters is normalized to one Z. */
+  WHEN substr(rtrim("${column}", 'Z'),  -6, 1) IN ('+', '-')
+       AND substr(rtrim("${column}", 'Z'), -3, 1) = ':'
+       AND length(rtrim("${column}", 'Z')) >= 25
+    THEN rtrim("${column}", 'Z')
+  WHEN substr("${column}", -1) = 'Z'
+    THEN rtrim("${column}", 'Z') || 'Z'
+  /* Bare ISO timestamps (no offset) get exactly one UTC marker. */
+  WHEN substr("${column}", 5, 1) = '-'
+       AND substr("${column}", 8, 1) = '-'
+       AND substr("${column}", 11, 1) = 'T'
+       AND substr("${column}", 14, 1) = ':'
+       AND substr("${column}", 17, 1) = ':'
+       AND substr("${column}", -1) NOT IN ('Z')
+       AND NOT (
+         substr("${column}", -6, 1) IN ('+', '-')
+         AND substr("${column}", -3, 1) = ':'
+       )
+    THEN "${column}" || 'Z'
+  ELSE "${column}"
+END
 WHERE "${column}" IS NOT NULL
-  AND typeof("${column}") = 'text'
-  AND length("${column}") >= 19
-  AND substr("${column}", 20, 1) NOT IN ('Z', '+', '-')
-  AND substr("${column}", 11, 1) = 'T';`,
+  AND typeof("${column}") = 'text';`,
       ),
     )
     .join("\n");

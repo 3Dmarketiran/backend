@@ -15,7 +15,8 @@
     "studio": "prisma studio",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "verify:economics": "node scripts/verify-economics.mjs"
+    "verify:economics": "node scripts/verify-economics.mjs",
+    "verify:d1-datetime": "node scripts/verify-d1-datetime-repair.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.658.0",
