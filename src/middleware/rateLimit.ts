@@ -45,7 +45,7 @@ export const apiRateLimiter = createLimiter({
 
   skip: (req) => {
     // Health checks should remain lightweight and available.
-    return req.path === "/health";
+    return req.path === "/health" || req.path.startsWith("/health/");
   },
 });
 

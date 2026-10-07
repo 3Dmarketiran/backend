@@ -295,7 +295,7 @@ const envSchema = z
           code: z.ZodIssueCode.custom,
           path: ["PUBLIC_ASSET_BASE_URL"],
           message:
-            "PUBLIC_ASSET_BASE_URL is required in production.",
+            "PUBLIC_ASSET_BASE_URL is required in production and must point to the public Cloudflare R2 delivery/custom domain.",
         });
       }
 

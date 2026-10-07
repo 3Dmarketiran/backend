@@ -11,6 +11,7 @@ function allowedOrigins(): Set<string> {
     "https://3dmarketiran.ir",
     "https://www.3dmarketiran.ir",
     "https://3dmarketiran.github.io",
+    "https://admin.3dmarketiran.ir",
   ]);
 }
 

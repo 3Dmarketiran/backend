@@ -827,7 +827,7 @@ async function getPublicProducts(
       const images =
         product.images.map(
           (image) => ({
-            url: image.storageKey ? publicAssetProxyUrl(image.storageKey) : image.url,
+            url: image.storageKey ? publicAssetUrl(image.storageKey) : image.url,
 
             isPrimary:
               image.isPrimary,
@@ -840,7 +840,7 @@ async function getPublicProducts(
             kind:
               model.kind,
 
-            url: model.storageKey ? publicAssetProxyUrl(model.storageKey) : model.url,
+            url: model.storageKey ? publicAssetUrl(model.storageKey) : model.url,
           })
         );
 
@@ -1001,7 +1001,7 @@ async function getPublicSellers() {
 
       logoUrl:
         seller.logoStorageKey
-          ? publicAssetProxyUrl(seller.logoStorageKey)
+          ? publicAssetUrl(seller.logoStorageKey)
           : seller.logoUrl,
 
       themeColor:
@@ -1026,13 +1026,30 @@ async function getPublicSellers() {
 }
 
 
-function publicAssetProxyUrl(storageKey: string): string {
+function publicAssetUrl(storageKey: string): string {
   const apiBase = (env.API_URL || "http://localhost:4000").replace(/\/+$/, "");
   const packageRef = parsePackageStorageKey(storageKey);
+
+  // Legacy ZIP packages cannot be addressed as individual R2 objects, so keep
+  // their compatibility route alive until the corresponding old records are
+  // re-uploaded. New assets never use this path.
   if (packageRef) {
     const packagePath = packageAssetUrl(packageRef.productId, packageRef.kind, packageRef.name);
     return `${apiBase}${packagePath}`;
   }
+
+  const baseUrl = env.PUBLIC_ASSET_BASE_URL?.replace(/\/+$/, "");
+  if (baseUrl) {
+    const encoded = storageKey
+      .split("/")
+      .filter(Boolean)
+      .map((part) => encodeURIComponent(part))
+      .join("/");
+    return `${baseUrl}/${encoded}`;
+  }
+
+  // Local development / legacy environments only. Production validation
+  // requires PUBLIC_ASSET_BASE_URL, which is the Cloudflare R2 delivery URL.
   const encoded = storageKey
     .split("/")
     .filter(Boolean)

@@ -131,15 +131,17 @@ sellersRouter.get(
         );
       }
 
+      const logoUrl = seller.logoStorageKey
+        ? await storage.getUrl(seller.logoStorageKey)
+        : seller.logoUrl;
+
       res.json({
         seller: {
           id: seller.id,
           slug: seller.slug,
           storeName: seller.storeName,
           description: seller.description,
-          logoUrl: seller.logoStorageKey
-            ? `${req.protocol}://${req.get("host")}/api/public/assets/${seller.logoStorageKey.split("/").filter(Boolean).map((part) => encodeURIComponent(part)).join("/")}`
-            : seller.logoUrl,
+          logoUrl,
           contactEmail:
             seller.contactEmail,
           contactPhone:
@@ -425,15 +427,17 @@ sellersRouter.get(
         throw new HttpError(404, "فروشنده یافت نشد.");
       }
 
+      const logoUrl = seller.logoStorageKey
+        ? await storage.getUrl(seller.logoStorageKey)
+        : seller.logoUrl;
+
       res.json({
         seller: {
           id: seller.id,
           slug: seller.slug,
           storeName: seller.storeName,
           description: seller.description,
-          logoUrl: seller.logoStorageKey
-            ? `${req.protocol}://${req.get("host")}/api/public/assets/${seller.logoStorageKey.split("/").map(encodeURIComponent).join("/")}`
-            : seller.logoUrl,
+          logoUrl,
           contactEmail: seller.contactEmail,
           contactPhone: seller.contactPhone,
           address: seller.address,
