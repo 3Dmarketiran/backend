@@ -88,12 +88,14 @@ export async function requestPublish(
   // visible before the static snapshot is actually deployed.
   let job: Awaited<ReturnType<typeof prisma.publishJob.create>>;
   try {
-    job = await prisma.$transaction(async (tx) => {
-      await tx.product.update({
+    // Cloudflare D1 does not support Prisma interactive transactions.
+    // Use Prisma's array/batch transaction API instead.
+    const [, createdJob] = await prisma.$transaction([
+      prisma.product.update({
         where: { id: product.id },
         data: { visibility: "PUBLISHED", hasUnpublishedChanges: true },
-      });
-      return tx.publishJob.create({
+      }),
+      prisma.publishJob.create({
         data: {
           sellerId: product.sellerId,
           productId: product.id,
@@ -101,8 +103,9 @@ export async function requestPublish(
           status: "QUEUED",
           operation: "PUBLISH",
         },
-      });
-    });
+      }),
+    ]);
+    job = createdJob;
   } catch (error) {
     if (isPrismaUniqueViolation(error)) {
       throw new HttpError(409, "برای این محصول یک عملیات انتشار در حال انجام است.");
@@ -158,12 +161,14 @@ export async function requestUnpublish(
 
   let job: Awaited<ReturnType<typeof prisma.publishJob.create>>;
   try {
-    job = await prisma.$transaction(async (tx) => {
-      await tx.product.update({
+    // Cloudflare D1 does not support Prisma interactive transactions.
+    // Use Prisma's array/batch transaction API instead.
+    const [, createdJob] = await prisma.$transaction([
+      prisma.product.update({
         where: { id: productId },
         data: { visibility: "HIDDEN", hasUnpublishedChanges: false },
-      });
-      return tx.publishJob.create({
+      }),
+      prisma.publishJob.create({
         data: {
           sellerId: product.sellerId,
           productId: product.id,
@@ -171,8 +176,9 @@ export async function requestUnpublish(
           status: "QUEUED",
           operation: "UNPUBLISH",
         },
-      });
-    });
+      }),
+    ]);
+    job = createdJob;
   } catch (error) {
     if (isPrismaUniqueViolation(error)) {
       throw new HttpError(409, "برای این محصول یک عملیات انتشار در حال انجام است.");
