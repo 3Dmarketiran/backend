@@ -1,68 +1,69 @@
 services:
-  - type: web
-    name: threedmarketiran-backend
-    env: node
-    rootDir: backend
-    buildCommand: npm install && npm run build
-    startCommand: npm start
-    healthCheckPath: /api/health/live
-    envVars:
-      - key: CLOUDFLARE_ACCOUNT_ID
-        sync: false
-      - key: CLOUDFLARE_DATABASE_ID
-        sync: false
-      - key: CLOUDFLARE_D1_TOKEN
-        sync: false
-      - key: NODE_ENV
-        value: production
-      - key: PORT
-        value: 10000
-      - key: SESSION_SECRET
-        sync: false
-      - key: GITHUB_TOKEN
-        sync: false
-      - key: GITHUB_OWNER
-        sync: false
-      - key: GITHUB_REPOSITORY
-        sync: false
-      - key: GITHUB_BRANCH
-        value: main
-      - key: PUBLIC_SITE_URL
-        sync: false
-      - key: API_URL
-        value: https://threedmarketiran-backend.onrender.com
-      - key: CORS_ORIGIN
-        value: https://3dmarketiran.github.io,https://3dmarketiran.ir,https://www.3dmarketiran.ir
-      # Cloudflare R2 via the S3-compatible API.
-      - key: STORAGE_PROVIDER
-        value: s3
-      - key: STORAGE_BUCKET
-        sync: false
-      - key: STORAGE_ENDPOINT
-        sync: false
-      - key: STORAGE_REGION
-        value: auto
-      - key: STORAGE_ACCESS_KEY
-        sync: false
-      - key: STORAGE_SECRET_KEY
-        sync: false
-      - key: PUBLIC_ASSET_BASE_URL
-        sync: false
-      - key: PUBLISH_ASSETS_TO_GITHUB
-        value: "true"
-      - key: PUBLIC_PUBLISH_TIMEOUT_MS
-        value: "300000"
-      - key: RATE_LIMIT_WINDOW_MS
-        value: "900000"
-      - key: RATE_LIMIT_MAX
-        value: "100"
-      - key: LOGIN_RATE_LIMIT_MAX
-        value: "10"
-      - key: TRAFFIC_COST_PER_GB_TOMAN
-        value: "23400"
-      - key: TRAFFIC_FIXED_COST_TOMAN
-        value: "83200"
-      - key: TRAFFIC_MIN_PRICE_MARGIN_PCT
-        value: "20"
-      - key: TRAFFIC_BUNDLE_MIN_MARGIN_PCT
-        value: "25"
+- type: web
+  name: threedmarketiran-backend
+  env: node
+  rootDir: backend
+  buildCommand: npm install --include=dev && npm run build
+  startCommand: npm start
+  healthCheckPath: /api/health/live
+  envVars:
+  - key: CLOUDFLARE_ACCOUNT_ID
+    sync: false
+  - key: CLOUDFLARE_DATABASE_ID
+    sync: false
+  - key: CLOUDFLARE_D1_TOKEN
+    sync: false
+  - key: NODE_ENV
+    value: production
+  - key: PORT
+    value: 10000
+  - key: NPM_CONFIG_PRODUCTION
+    value: 'false'
+  - key: SESSION_SECRET
+    sync: false
+  - key: GITHUB_TOKEN
+    sync: false
+  - key: GITHUB_OWNER
+    sync: false
+  - key: GITHUB_REPOSITORY
+    sync: false
+  - key: GITHUB_BRANCH
+    value: main
+  - key: PUBLIC_SITE_URL
+    sync: false
+  - key: API_URL
+    value: https://threedmarketiran-backend.onrender.com
+  - key: CORS_ORIGIN
+    value: https://3dmarketiran.github.io,https://3dmarketiran.ir,https://www.3dmarketiran.ir
+  - key: STORAGE_PROVIDER
+    value: s3
+  - key: STORAGE_BUCKET
+    sync: false
+  - key: STORAGE_ENDPOINT
+    sync: false
+  - key: STORAGE_REGION
+    value: auto
+  - key: STORAGE_ACCESS_KEY
+    sync: false
+  - key: STORAGE_SECRET_KEY
+    sync: false
+  - key: PUBLIC_ASSET_BASE_URL
+    sync: false
+  - key: PUBLISH_ASSETS_TO_GITHUB
+    value: 'true'
+  - key: PUBLIC_PUBLISH_TIMEOUT_MS
+    value: '300000'
+  - key: RATE_LIMIT_WINDOW_MS
+    value: '900000'
+  - key: RATE_LIMIT_MAX
+    value: '100'
+  - key: LOGIN_RATE_LIMIT_MAX
+    value: '10'
+  - key: TRAFFIC_COST_PER_GB_TOMAN
+    value: '23400'
+  - key: TRAFFIC_FIXED_COST_TOMAN
+    value: '83200'
+  - key: TRAFFIC_MIN_PRICE_MARGIN_PCT
+    value: '20'
+  - key: TRAFFIC_BUNDLE_MIN_MARGIN_PCT
+    value: '25'
