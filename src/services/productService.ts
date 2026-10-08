@@ -337,8 +337,22 @@ export async function listProducts(
     }),
   ]);
 
+  const decoratedItems = await Promise.all(
+    items.map(async (item) => ({
+      ...item,
+      images: await Promise.all(
+        item.images.map(async (image) => ({
+          ...image,
+          url: image.storageKey
+            ? await storage.getUrl(image.storageKey)
+            : image.url,
+        }))
+      ),
+    }))
+  );
+
   return {
-    items,
+    items: decoratedItems,
     total,
     page: query.page,
     pageSize:
@@ -389,7 +403,27 @@ export async function getProductById(
     );
   }
 
-  return product;
+  const decorated = {
+    ...product,
+    images: await Promise.all(
+      product.images.map(async (image) => ({
+        ...image,
+        url: image.storageKey
+          ? await storage.getUrl(image.storageKey)
+          : image.url,
+      }))
+    ),
+    models: await Promise.all(
+      product.models.map(async (model) => ({
+        ...model,
+        url: model.storageKey
+          ? await storage.getUrl(model.storageKey)
+          : model.url,
+      }))
+    ),
+  };
+
+  return decorated;
 }
 
 /* -------------------------------------------------------------------------- */
