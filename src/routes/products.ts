@@ -153,6 +153,8 @@ productsRouter.get(
       const base = host ? `${req.protocol}://${host}` : "";
       const decorated = {
         ...product,
+        // Normal assets are already canonical R2 URLs from productService.
+        // Only legacy ZIP members require the backend compatibility route.
         images: product.images.map((image) => {
           const ref = productPackageService.parsePackageStorageKey(image.storageKey);
           return ref ? { ...image, url: `${base}${productPackageService.packageAssetUrl(ref.productId, ref.kind, ref.name)}` } : image;

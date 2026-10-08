@@ -434,19 +434,19 @@ async function resolveCatalogAssetUrl(
   storageKey: string,
   storedUrl?: string,
 ): Promise<string> {
-  // Keep all browser-facing product media on the same-origin backend host.
-  // This avoids requiring visitors to reach Supabase directly (which may be
-  // unavailable on some networks). Storage credentials remain server-side.
-  // Legacy ZIP assets retain their existing compatibility route.
+  // Browser-facing assets must come directly from the configured public
+  // storage domain (Cloudflare R2 in production). This keeps the API/Render
+  // service out of the image/model delivery path. Legacy ZIP packages are the
+  // only exception because their individual files live inside one ZIP object.
   const ref = parsePackageStorageKey(storageKey);
   if (ref) {
     return absolutePackageUrl(req, packageAssetUrl(ref.productId, ref.kind, ref.name));
   }
 
-  if (storageKey) return absolutePublicAssetUrl(req, storageKey);
+  if (storageKey) return storage.getUrl(storageKey);
   const legacyKey = extractLegacyPublicStorageKey(storedUrl);
-  if (legacyKey) return absolutePublicAssetUrl(req, legacyKey);
-  return resolveAssetUrl(req, storageKey, storedUrl);
+  if (legacyKey) return storage.getUrl(legacyKey);
+  return storedUrl || resolveAssetUrl(req, storageKey, storedUrl);
 }
 
 async function publicLogoUrl(
@@ -455,11 +455,10 @@ async function publicLogoUrl(
   logoUrl: string | null | undefined,
   logoStorageKey: string | null | undefined,
 ): Promise<string | null> {
-  // Always expose the logo through our backend public-asset route. This avoids
-  // leaking provider-specific URLs and guarantees the browser gets consistent
-  // CORS/MIME/cache behavior even when the underlying storage provider changes.
+  // Logos are public assets too: return the canonical Cloudflare R2 URL so
+  // both the public site and seller/admin previews use the same delivery path.
   const storageKey = logoStorageKey || (logoUrl ? extractStorageKey(logoUrl) : null) || extractLegacyPublicStorageKey(logoUrl);
-  if (storageKey) return absolutePublicAssetUrl(req, storageKey);
+  if (storageKey) return storage.getUrl(storageKey);
 
   // Legacy rows that predate logoStorageKey: only return a pre-existing
   // absolute HTTPS URL. Never invent a fallback route that may not exist.

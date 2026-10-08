@@ -322,6 +322,10 @@ async function startServer() {
     );
   });
 
+  void startBackgroundTasksAfterD1Repair().catch((error) => {
+    console.error("[subscriptions] failed to initialize background task", error);
+  });
+
   void recoverPendingPublishJobs().then((count) => {
     if (count > 0) console.log(`[publish] recovered ${count} pending job(s)`);
   }).catch((error) => {
@@ -337,8 +341,6 @@ void startServer().catch((error) => {
 /* -------------------------------------------------------------------------- */
 /* Subscription expiration                                                    */
 /* -------------------------------------------------------------------------- */
-
-let subscriptionInterval: NodeJS.Timeout | undefined;
 
 async function runSubscriptionExpiration() {
   try {
@@ -364,14 +366,21 @@ async function runSubscriptionExpiration() {
  * In production, an external scheduler/cron can also call the same
  * lifecycle operation if the deployment platform supports it.
  */
-void runSubscriptionExpiration();
+// Startup D1 repair must complete before any background task touches Prisma.
+// This avoids a race where the subscription checker reads malformed legacy
+// DateTime strings before repairD1DateTimes() has normalized them.
+let subscriptionInterval: NodeJS.Timeout | undefined;
 
-subscriptionInterval = setInterval(
-  () => {
-    void runSubscriptionExpiration();
-  },
-  15 * 60 * 1000,
-);
+async function startBackgroundTasksAfterD1Repair() {
+  await runSubscriptionExpiration();
+  subscriptionInterval = setInterval(
+    () => {
+      void runSubscriptionExpiration();
+    },
+    15 * 60 * 1000,
+  );
+}
+
 
 /* -------------------------------------------------------------------------- */
 /* Graceful shutdown                                                          */
