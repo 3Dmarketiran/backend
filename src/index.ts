@@ -282,15 +282,33 @@ app.use(
       return;
     }
 
-    const message =
-      isProduction
-        ? "خطای داخلی سرور رخ داد."
-        : err instanceof Error
-          ? err.message
-          : "خطای داخلی سرور رخ داد.";
+    const statusCode =
+      err &&
+      typeof err === "object" &&
+      "statusCode" in err &&
+      typeof (err as { statusCode?: unknown }).statusCode === "number"
+        ? (err as { statusCode: number }).statusCode
+        : 500;
 
-    res.status(500).json({
+    const message =
+      statusCode < 500 && err instanceof Error
+        ? err.message
+        : isProduction
+          ? "خطای داخلی سرور رخ داد."
+          : err instanceof Error
+            ? err.message
+            : "خطای داخلی سرور رخ داد.";
+
+    const details =
+      err &&
+      typeof err === "object" &&
+      "details" in err
+        ? (err as { details?: unknown }).details
+        : undefined;
+
+    res.status(statusCode).json({
       error: message,
+      ...(details !== undefined ? { details } : {}),
     });
   },
 );

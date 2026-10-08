@@ -214,13 +214,13 @@ subscriptionsRouter.get(
   }
 );
 
-function assertPlanEconomicFloor(trafficLimitGb: number | null | undefined, durationDays: number, price: number) {
-  if (trafficLimitGb != null) {
-    const floor = pricingFloorForTraffic(trafficLimitGb, durationDays);
-    if (price < floor) {
-      throw new HttpError(409, `قیمت پلن باید حداقل ${floor.toLocaleString("fa-IR")} تومان باشد تا هزینه محافظتی ترافیک و هزینه ثابت مدل پوشش داده شود.`);
-    }
-  }
+function getPlanEconomicFloorError(trafficLimitGb: number | null | undefined, durationDays: number, price: number) {
+  if (trafficLimitGb == null) return null;
+
+  const floor = pricingFloorForTraffic(trafficLimitGb, durationDays);
+  if (price >= floor) return null;
+
+  return `قیمت پلن باید حداقل ${floor.toLocaleString("fa-IR")} تومان باشد تا هزینه محافظتی ترافیک و هزینه ثابت مدل پوشش داده شود.`;
 }
 
 const planSchema =
@@ -298,7 +298,10 @@ subscriptionsRouter.post(
           req.body
         );
 
-      assertPlanEconomicFloor(input.trafficLimitGb, input.durationDays, input.price);
+      const economicFloorError = getPlanEconomicFloorError(input.trafficLimitGb, input.durationDays, input.price);
+      if (economicFloorError) {
+        return res.status(409).json({ error: economicFloorError });
+      }
 
       const plan =
         await prisma.subscriptionPlan.create(
@@ -406,11 +409,14 @@ subscriptionsRouter.put(
         );
       }
 
-      assertPlanEconomicFloor(
+      const economicFloorError = getPlanEconomicFloorError(
         input.trafficLimitGb !== undefined ? input.trafficLimitGb : existing.trafficLimitGb,
         input.durationDays !== undefined ? input.durationDays : existing.durationDays,
         input.price !== undefined ? input.price : existing.price,
       );
+      if (economicFloorError) {
+        return res.status(409).json({ error: economicFloorError });
+      }
 
       const plan =
         await prisma.subscriptionPlan.update(
