@@ -353,7 +353,7 @@ publicCatalogRouter.get("/catalog", async (req, res, next) => {
       storeName: seller.storeName,
       description: seller.description,
       logoUrl: (seller.logoStorageKey || seller.logoUrl)
-        ? await publicLogoUrl(req, seller.slug, seller.logoUrl, seller.logoStorageKey)
+        ? await publicLogoUrl(seller.slug, seller.logoUrl, seller.logoStorageKey)
         : null,
       themeColor: seller.themeColor,
       contactEmail: seller.contactEmail,
@@ -450,7 +450,6 @@ async function resolveCatalogAssetUrl(
 }
 
 async function publicLogoUrl(
-  req: { protocol: string; get(name: string): string | undefined },
   sellerSlug: string,
   logoUrl: string | null | undefined,
   logoStorageKey: string | null | undefined,
@@ -515,19 +514,6 @@ function extractStorageKey(value: string): string | null {
   return null;
 }
 
-function absolutePublicAssetUrl(
-  req: { protocol: string; get(name: string): string | undefined },
-  storageKey: string,
-): string {
-  const host = req.get("host");
-  if (!host) throw new HttpError(500, "آدرس عمومی Backend تنظیم نشده است.");
-  const encoded = storageKey
-    .split("/")
-    .filter(Boolean)
-    .map((part) => encodeURIComponent(part))
-    .join("/");
-  return `${req.protocol}://${host}/api/public/assets/${encoded}`;
-}
 
 function absolutePackageUrl(req: { protocol: string; get(name: string): string | undefined }, relative: string): string {
   const host = req.get("host");

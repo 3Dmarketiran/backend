@@ -26,8 +26,20 @@ export function errorHandler(err: unknown, req: Request, res: Response, _next: N
     return res.status(err.statusCode).json({ error: err.message });
   }
 
-  if (err instanceof HttpError) {
-    return res.status(err.statusCode).json({ error: err.message, details: err.details });
+  if (
+    err instanceof HttpError ||
+    (
+      typeof err === "object" &&
+      err !== null &&
+      "statusCode" in err &&
+      typeof (err as { statusCode?: unknown }).statusCode === "number"
+    )
+  ) {
+    const httpErr = err as HttpError;
+    return res.status(httpErr.statusCode).json({
+      error: httpErr.message,
+      details: httpErr.details,
+    });
   }
 
   // Unknown error: never leak stack traces or internals to the client,
