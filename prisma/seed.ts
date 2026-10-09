@@ -68,6 +68,8 @@ async function main() {
           features: "{}",
         },
       });
+    } else if (existingPlan.trafficLimitGb == null) {
+      await prisma.subscriptionPlan.update({ where: { id }, data: { trafficLimitGb: plan.trafficLimitGb } });
     }
   }
 

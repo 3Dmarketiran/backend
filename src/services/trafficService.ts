@@ -43,7 +43,7 @@ export function trafficWarningLevel(used: bigint, allowance: bigint | null): Tra
   if (allowance <= 0n) return used > 0n ? "EXCEEDED" : "NORMAL";
   const pct = Number((used * 10000n) / allowance) / 100;
   if (pct >= 100) return "EXCEEDED";
-  if (pct >= 85) return "DANGER";
+  if (pct >= 80) return "DANGER";
   if (pct >= 70) return "WARNING";
   return "NORMAL";
 }
@@ -83,6 +83,24 @@ async function purchasedBytesForPeriod(sellerId: string, periodStart: Date, peri
   return BigInt(result._sum.gigabytes ?? 0) * BYTES_PER_GB;
 }
 
+function inferredTrafficLimitGb(plan: { trafficLimitGb: number | null; productLimit?: number | null; storageLimitMb?: number | null }): number {
+  if (plan.trafficLimitGb != null && Number.isInteger(plan.trafficLimitGb) && plan.trafficLimitGb > 0) return plan.trafficLimitGb;
+  if (plan.productLimit === 10 && plan.storageLimitMb === 500) return 5;
+  if (plan.productLimit === 30 && plan.storageLimitMb === 1536) return 12;
+  if (plan.productLimit === 100 && plan.storageLimitMb === 5120) return 25;
+  // Unlimited is no longer a valid seller-plan state. Fail closed for legacy
+  // rows that cannot be mapped to a known platform tier.
+  return 0;
+}
+
+async function effectivePlanTrafficLimit(plan: any): Promise<number> {
+  const effective = inferredTrafficLimitGb(plan);
+  if (plan.trafficLimitGb == null && effective > 0) {
+    await prisma.subscriptionPlan.update({ where: { id: plan.id }, data: { trafficLimitGb: effective } }).catch(() => undefined);
+  }
+  return effective;
+}
+
 export async function getTrafficSnapshot(sellerId: string, now = new Date()): Promise<TrafficSnapshot> {
   const { periodStart, periodEnd } = getUtcTrafficPeriod(now);
   const [sub, usage, purchasedBytes, pendingCount] = await Promise.all([
@@ -92,11 +110,12 @@ export async function getTrafficSnapshot(sellerId: string, now = new Date()): Pr
     prisma.trafficPurchase.count({ where: { sellerId, periodStart, periodEnd, status: "PENDING" } }),
   ]);
 
-  const includedBytes = bytesFromGb(sub?.plan.trafficLimitGb);
+  const effectiveTrafficGb = sub ? await effectivePlanTrafficLimit(sub.plan) : null;
+  const includedBytes = effectiveTrafficGb == null ? null : bytesFromGb(effectiveTrafficGb);
   const usedBytes = BigInt(usage.servedBytes);
   const allowance = includedBytes == null ? null : includedBytes + purchasedBytes;
   const remainingBytes = allowance == null ? null : allowance > usedBytes ? allowance - usedBytes : 0n;
-  const usedPercent = allowance == null || allowance === 0n ? null : Math.min(100, Number((usedBytes * 10000n) / allowance) / 100);
+  const usedPercent = allowance == null ? null : allowance === 0n ? (usedBytes > 0n ? 100 : 0) : Math.min(100, Number((usedBytes * 10000n) / allowance) / 100);
 
   return {
     periodStart,
@@ -107,7 +126,7 @@ export async function getTrafficSnapshot(sellerId: string, now = new Date()): Pr
     remainingBytes,
     usedPercent,
     warningLevel: trafficWarningLevel(usedBytes, allowance),
-    plan: sub ? { id: sub.plan.id, name: sub.plan.name, trafficLimitGb: sub.plan.trafficLimitGb } : null,
+    plan: sub ? { id: sub.plan.id, name: sub.plan.name, trafficLimitGb: effectiveTrafficGb } : null,
     pendingPurchases: pendingCount,
   };
 }
@@ -126,8 +145,9 @@ export async function reserveTrafficOrThrow(sellerId: string, bytes: number, now
   ]);
 
   if (!sub) throw new HttpError(403, "اشتراک فعال این فروشگاه پیدا نشد.");
-  const includedBytes = bytesFromGb(sub.plan.trafficLimitGb);
-  if (includedBytes == null) return async () => undefined;
+  const effectiveTrafficGb = await effectivePlanTrafficLimit(sub.plan);
+  const includedBytes = bytesFromGb(effectiveTrafficGb);
+  if (includedBytes == null) throw new HttpError(403, "سقف ترافیک این پلن مشخص نیست.");
 
   const allowance = includedBytes + purchasedBytes;
   const usage = await ensureUsageRow(sellerId, periodStart, periodEnd);

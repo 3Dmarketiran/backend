@@ -94,15 +94,14 @@ publicCatalogRouter.get("/assets/*", async (req, res, next) => {
             },
           },
         },
-        select: {
-          id: true,
-          sellerId: true,
-          images: { where: { storageKey: key }, select: { id: true } },
-          models: { where: { storageKey: key }, select: { id: true } },
-        },
+        select: { id: true, sellerId: true },
       });
 
-      if (!product || (product.images.length === 0 && product.models.length === 0)) {
+      // New R2 assets (including GLTF .bin/textures) are all delivered through
+      // this endpoint so the monthly seller quota can be enforced. The key is
+      // restricted to this product's asset namespace to prevent arbitrary R2 reads.
+      const allowedPrefix = `products/${resourceId}/${assetType}/`;
+      if (!product || !key.startsWith(allowedPrefix) || key.split("/").some((part) => part === ".." || part === ".")) {
         throw new HttpError(404, "فایل محصول منتشرشده پیدا نشد.");
       }
     } else if (resource === "sellers") {
@@ -443,9 +442,15 @@ async function resolveCatalogAssetUrl(
     return absolutePackageUrl(req, packageAssetUrl(ref.productId, ref.kind, ref.name));
   }
 
-  if (storageKey) return storage.getUrl(storageKey);
+  if (storageKey) {
+    const encoded = storageKey.split("/").filter(Boolean).map((part) => encodeURIComponent(part)).join("/");
+    return absolutePublicAssetUrl(req, `/api/public/assets/${encoded}`);
+  }
   const legacyKey = extractLegacyPublicStorageKey(storedUrl);
-  if (legacyKey) return storage.getUrl(legacyKey);
+  if (legacyKey) {
+    const encoded = legacyKey.split("/").filter(Boolean).map((part) => encodeURIComponent(part)).join("/");
+    return absolutePublicAssetUrl(req, `/api/public/assets/${encoded}`);
+  }
   return storedUrl || resolveAssetUrl(req, storageKey, storedUrl);
 }
 
@@ -457,10 +462,18 @@ async function publicLogoUrl(
   // Logos are public assets too: return the canonical Cloudflare R2 URL so
   // both the public site and seller/admin previews use the same delivery path.
   const storageKey = logoStorageKey || (logoUrl ? extractStorageKey(logoUrl) : null) || extractLegacyPublicStorageKey(logoUrl);
-  if (storageKey) return storage.getUrl(storageKey);
+  if (storageKey) {
+    const encoded = storageKey.split("/").filter(Boolean).map((part) => encodeURIComponent(part)).join("/");
+    return `${(process.env.API_URL || "http://localhost:4000").replace(/\/+$/, "")}/api/public/assets/${encoded}`;
+  }
 
-  // Legacy rows that predate logoStorageKey: only return a pre-existing
-  // absolute HTTPS URL. Never invent a fallback route that may not exist.
+  // Legacy rows: if the old object URL can be mapped to our configured bucket,
+  // keep it behind the same quota-enforcing public asset route.
+  const legacyKey = extractLegacyPublicStorageKey(logoUrl);
+  if (legacyKey) {
+    const encodedLegacy = legacyKey.split("/").filter(Boolean).map((part) => encodeURIComponent(part)).join("/");
+    return `${(process.env.API_URL || "http://localhost:4000").replace(/\/+$/, "")}/api/public/assets/${encodedLegacy}`;
+  }
   if (logoUrl && /^https:\/\//i.test(logoUrl)) return logoUrl;
   logger.warn({ sellerSlug }, "public seller logo could not be resolved; catalog will continue without logo");
   return null;
@@ -514,6 +527,12 @@ function extractStorageKey(value: string): string | null {
   return null;
 }
 
+
+function absolutePublicAssetUrl(req: { protocol: string; get(name: string): string | undefined }, relative: string): string {
+  const host = req.get("host");
+  if (!host) throw new HttpError(500, "آدرس عمومی Backend تنظیم نشده است.");
+  return `${req.protocol}://${host}${relative}`;
+}
 
 function absolutePackageUrl(req: { protocol: string; get(name: string): string | undefined }, relative: string): string {
   const host = req.get("host");

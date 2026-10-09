@@ -21,6 +21,8 @@ import * as productService from "../services/productService";
 import * as assetService from "../services/assetService";
 import * as productPackageService from "../services/productPackageService";
 import { prisma } from "../config/prisma";
+import { storage } from "../storage";
+import { readPackageAsset, getPackageContentType, parsePackageStorageKey } from "../services/productPackageService";
 import { queueRepublishForSeller } from "../services/publishService";
 
 export const productsRouter = Router();
@@ -45,6 +47,25 @@ function isStaffRole(
     role === "ADMIN" ||
     role === "SUPER_ADMIN"
   );
+}
+
+function sellerAssetUrl(req: any, productId: string, storageKey: string, kind: "images" | "models" | "ar") {
+  const host = req.get("host");
+  const base = host ? `${req.protocol}://${host}` : "";
+  const encoded = storageKey.split("/").filter(Boolean).map((part: string) => encodeURIComponent(part)).join("/");
+  return `${base}/api/products/${encodeURIComponent(productId)}/assets/${kind}/${encoded}`;
+}
+
+function contentTypeForAsset(key: string) {
+  const lower = key.toLowerCase();
+  if (lower.endsWith(".glb")) return "model/gltf-binary";
+  if (lower.endsWith(".gltf")) return "model/gltf+json";
+  if (lower.endsWith(".usdz")) return "model/vnd.usdz+zip";
+  if (lower.endsWith(".bin")) return "application/octet-stream";
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".webp")) return "image/webp";
+  return "application/octet-stream";
 }
 
 // ---------------------------------------------------------------------
@@ -89,10 +110,46 @@ productsRouter.get(
           }
         );
 
+      if (req.user?.role === "SELLER" || isStaffRole(req.user?.role)) {
+        result.items = result.items.map((item: any) => ({
+          ...item,
+          images: item.images.map((image: any) => image.storageKey ? { ...image, url: sellerAssetUrl(req, item.id, image.storageKey, "images") } : image),
+        }));
+      }
       res.json(result);
     } catch (err) {
       next(err);
     }
+  }
+);
+
+// ---------------------------------------------------------------------
+// Authenticated seller/staff asset preview. These reads never consume the
+// storefront traffic quota because they are internal dashboard previews.
+// ---------------------------------------------------------------------
+productsRouter.get(
+  "/:id/assets/:kind/*",
+  requireAuth,
+  async (req, res, next) => {
+    try {
+      const productId = assertRouteId(req.params.id, "شناسه محصول نامعتبر است.");
+      const kind = String(req.params.kind || "");
+      if (!["images", "models", "ar"].includes(kind)) throw new HttpError(404, "نوع فایل نامعتبر است.");
+      const raw = String((req.params as Record<string, string | undefined>)["0"] || "").replace(/^\/+/, "");
+      const key = decodeURIComponent(raw).replace(/\\/g, "/");
+      if (!key || key.includes("..")) throw new HttpError(404, "فایل پیدا نشد.");
+      const product = await prisma.product.findUnique({ where: { id: productId }, select: { sellerId: true } });
+      const isOwner = req.user?.seller?.id === product?.sellerId;
+      if (!product || (!isOwner && !isStaffRole(req.user?.role))) throw new HttpError(404, "فایل پیدا نشد.");
+      const prefix = `products/${productId}/${kind}/`;
+      if (!key.startsWith(prefix)) throw new HttpError(404, "فایل پیدا نشد.");
+      const ref = parsePackageStorageKey(key);
+      const buffer = ref ? await readPackageAsset(productId, ref.kind, ref.name) : await storage.read(key);
+      res.setHeader("Content-Type", ref ? getPackageContentType(ref.name) : contentTypeForAsset(key));
+      res.setHeader("Cache-Control", "private, max-age=300");
+      res.setHeader("Access-Control-Allow-Origin", req.get("origin") || "*");
+      return res.send(buffer);
+    } catch (err) { next(err); }
   }
 );
 
@@ -157,11 +214,11 @@ productsRouter.get(
         // Only legacy ZIP members require the backend compatibility route.
         images: product.images.map((image) => {
           const ref = productPackageService.parsePackageStorageKey(image.storageKey);
-          return ref ? { ...image, url: `${base}${productPackageService.packageAssetUrl(ref.productId, ref.kind, ref.name)}` } : image;
+          return ref ? { ...image, url: `${base}${productPackageService.packageAssetUrl(ref.productId, ref.kind, ref.name)}` } : (isOwner || isStaff ? { ...image, url: sellerAssetUrl(req, product.id, image.storageKey, "images") } : image);
         }),
         models: product.models.map((model) => {
           const ref = productPackageService.parsePackageStorageKey(model.storageKey);
-          return ref ? { ...model, url: `${base}${productPackageService.packageAssetUrl(ref.productId, ref.kind, ref.name)}` } : model;
+          return ref ? { ...model, url: `${base}${productPackageService.packageAssetUrl(ref.productId, ref.kind, ref.name)}` } : (isOwner || isStaff ? { ...model, url: sellerAssetUrl(req, product.id, model.storageKey, model.kind === "USDZ" ? "ar" : "models") } : model);
         }),
       };
 

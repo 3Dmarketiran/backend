@@ -258,7 +258,6 @@ const planSchema =
       .number()
       .int()
       .positive()
-      .nullable()
       .optional(),
 
     categoryId: z.string().trim().min(1).nullable().optional(),
@@ -852,6 +851,22 @@ subscriptionsRouter.post(
               60 *
               1000
         );
+
+      // Older plans created before traffic quotas were made mandatory may have
+      // a null quota. Repair the known platform tiers on activation so a new
+      // seller never silently receives an unlimited storefront.
+      if (plan.trafficLimitGb == null) {
+        const inferredTraffic = plan.productLimit === 10 && plan.storageLimitMb === 500
+          ? 5
+          : plan.productLimit === 30 && plan.storageLimitMb === 1536
+            ? 12
+            : plan.productLimit === 100 && plan.storageLimitMb === 5120
+              ? 25
+              : null;
+        if (inferredTraffic == null) throw new HttpError(409, "این پلن سقف ترافیک مشخصی ندارد. ابتدا سقف ترافیک پلن را در پنل مدیریت تعیین کنید.");
+        await prisma.subscriptionPlan.update({ where: { id: plan.id }, data: { trafficLimitGb: inferredTraffic } });
+        plan.trafficLimitGb = inferredTraffic;
+      }
 
       const subscription =
         await prisma.subscription.create(
