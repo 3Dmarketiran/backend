@@ -64,9 +64,9 @@ function isSubscriptionCurrentlyActive(
 
 function inferDefaultTrafficGb(plan: { id?: string | null; name?: string | null; productLimit?: number | null; storageLimitMb?: number | null }): number | null {
   const identity = `${String(plan.id || "")} ${String(plan.name || "")}`.toLowerCase();
-  if (/starter/.test(identity) || (plan.productLimit === 10 && plan.storageLimitMb === 500)) return 5;
-  if (/semi[- ]professional|semi professional/.test(identity) || (plan.productLimit === 30 && (plan.storageLimitMb === 1536 || plan.storageLimitMb === 1500))) return 12;
-  if (/professional/.test(identity) || (plan.productLimit === 100 && (plan.storageLimitMb === 5120 || plan.storageLimitMb === 5000))) return 25;
+  if (/starter/.test(identity) || (plan.productLimit === 10 && plan.storageLimitMb === 500)) return 100;
+  if (/semi[- ]professional|semi professional/.test(identity) || (plan.productLimit === 30 && (plan.storageLimitMb === 1536 || plan.storageLimitMb === 1500))) return 150;
+  if (/professional/.test(identity) || (plan.productLimit === 100 && (plan.storageLimitMb === 5120 || plan.storageLimitMb === 5000))) return 300;
   return null;
 }
 

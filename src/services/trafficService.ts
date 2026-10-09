@@ -85,9 +85,9 @@ async function purchasedBytesForPeriod(sellerId: string, periodStart: Date, peri
 
 function inferredTrafficLimitGb(plan: { trafficLimitGb: number | null; productLimit?: number | null; storageLimitMb?: number | null }): number {
   if (plan.trafficLimitGb != null && Number.isInteger(plan.trafficLimitGb) && plan.trafficLimitGb > 0) return plan.trafficLimitGb;
-  if (plan.productLimit === 10 && plan.storageLimitMb === 500) return 5;
-  if (plan.productLimit === 30 && plan.storageLimitMb === 1536) return 12;
-  if (plan.productLimit === 100 && plan.storageLimitMb === 5120) return 25;
+  if (plan.productLimit === 10 && plan.storageLimitMb === 500) return 100;
+  if (plan.productLimit === 30 && plan.storageLimitMb === 1536) return 150;
+  if (plan.productLimit === 100 && plan.storageLimitMb === 5120) return 300;
   // Unlimited is no longer a valid seller-plan state. Fail closed for legacy
   // rows that cannot be mapped to a known platform tier.
   return 0;

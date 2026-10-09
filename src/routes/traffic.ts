@@ -77,7 +77,7 @@ trafficRouter.get("/admin/overview", requireAuth, requireAdmin, async (_req, res
       const usedBytes = usage?.servedBytes ?? 0n;
       const purchasedGb = purchaseMap.get(s.id) ?? 0;
       const includedGb = plan
-        ? (plan.trafficLimitGb ?? (plan.productLimit === 10 && plan.storageLimitMb === 500 ? 5 : plan.productLimit === 30 && plan.storageLimitMb === 1536 ? 12 : plan.productLimit === 100 && plan.storageLimitMb === 5120 ? 25 : 0))
+        ? (plan.trafficLimitGb ?? (plan.productLimit === 10 && plan.storageLimitMb === 500 ? 100 : plan.productLimit === 30 && plan.storageLimitMb === 1536 ? 150 : plan.productLimit === 100 && plan.storageLimitMb === 5120 ? 300 : 0))
         : null;
       const allowanceGb = includedGb == null ? null : includedGb + purchasedGb;
       const allowanceBytes = allowanceGb == null ? null : BigInt(allowanceGb) * (1024n ** 3n);

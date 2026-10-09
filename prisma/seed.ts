@@ -25,20 +25,20 @@ async function main() {
   });
 
   const planDefs = [
-    { name: "Starter", durationDays: 30, price: 1290000, discountPct: 0, productLimit: 10, storageLimitMb: 500, trafficLimitGb: 5, sortOrder: 10, isPublic: true },
-    { name: "Starter · ۳ ماهه", durationDays: 90, price: 3676500, discountPct: 5, productLimit: 10, storageLimitMb: 500, trafficLimitGb: 5, sortOrder: 11, isPublic: true },
-    { name: "Starter · ۶ ماهه", durationDays: 180, price: 6966000, discountPct: 10, productLimit: 10, storageLimitMb: 500, trafficLimitGb: 5, sortOrder: 12, isPublic: true },
-    { name: "Starter · ۱۲ ماهه", durationDays: 365, price: 13158000, discountPct: 15, productLimit: 10, storageLimitMb: 500, trafficLimitGb: 5, sortOrder: 13, isPublic: true },
+    { name: "Starter", durationDays: 30, price: 1290000, discountPct: 0, productLimit: 10, storageLimitMb: 500, trafficLimitGb: 100, sortOrder: 10, isPublic: true },
+    { name: "Starter · ۳ ماهه", durationDays: 90, price: 3676500, discountPct: 5, productLimit: 10, storageLimitMb: 500, trafficLimitGb: 100, sortOrder: 11, isPublic: true },
+    { name: "Starter · ۶ ماهه", durationDays: 180, price: 6966000, discountPct: 10, productLimit: 10, storageLimitMb: 500, trafficLimitGb: 100, sortOrder: 12, isPublic: true },
+    { name: "Starter · ۱۲ ماهه", durationDays: 365, price: 13158000, discountPct: 15, productLimit: 10, storageLimitMb: 500, trafficLimitGb: 100, sortOrder: 13, isPublic: true },
 
-    { name: "Semi-Professional", durationDays: 30, price: 2490000, discountPct: 0, productLimit: 30, storageLimitMb: 1536, trafficLimitGb: 12, sortOrder: 20, isPublic: true },
-    { name: "Semi-Professional · ۳ ماهه", durationDays: 90, price: 7096500, discountPct: 5, productLimit: 30, storageLimitMb: 1536, trafficLimitGb: 12, sortOrder: 21, isPublic: true },
-    { name: "Semi-Professional · ۶ ماهه", durationDays: 180, price: 13446000, discountPct: 10, productLimit: 30, storageLimitMb: 1536, trafficLimitGb: 12, sortOrder: 22, isPublic: true },
-    { name: "Semi-Professional · ۱۲ ماهه", durationDays: 365, price: 25398000, discountPct: 15, productLimit: 30, storageLimitMb: 1536, trafficLimitGb: 12, sortOrder: 23, isPublic: true },
+    { name: "Semi-Professional", durationDays: 30, price: 2490000, discountPct: 0, productLimit: 30, storageLimitMb: 1536, trafficLimitGb: 150, sortOrder: 20, isPublic: true },
+    { name: "Semi-Professional · ۳ ماهه", durationDays: 90, price: 7096500, discountPct: 5, productLimit: 30, storageLimitMb: 1536, trafficLimitGb: 150, sortOrder: 21, isPublic: true },
+    { name: "Semi-Professional · ۶ ماهه", durationDays: 180, price: 13446000, discountPct: 10, productLimit: 30, storageLimitMb: 1536, trafficLimitGb: 150, sortOrder: 22, isPublic: true },
+    { name: "Semi-Professional · ۱۲ ماهه", durationDays: 365, price: 25398000, discountPct: 15, productLimit: 30, storageLimitMb: 1536, trafficLimitGb: 150, sortOrder: 23, isPublic: true },
 
-    { name: "Professional", durationDays: 30, price: 4490000, discountPct: 0, productLimit: 100, storageLimitMb: 5120, trafficLimitGb: 25, sortOrder: 30, isPublic: true },
-    { name: "Professional · ۳ ماهه", durationDays: 90, price: 12796500, discountPct: 5, productLimit: 100, storageLimitMb: 5120, trafficLimitGb: 25, sortOrder: 31, isPublic: true },
-    { name: "Professional · ۶ ماهه", durationDays: 180, price: 24246000, discountPct: 10, productLimit: 100, storageLimitMb: 5120, trafficLimitGb: 25, sortOrder: 32, isPublic: true },
-    { name: "Professional · ۱۲ ماهه", durationDays: 365, price: 45798000, discountPct: 15, productLimit: 100, storageLimitMb: 5120, trafficLimitGb: 25, sortOrder: 33, isPublic: true },
+    { name: "Professional", durationDays: 30, price: 4490000, discountPct: 0, productLimit: 100, storageLimitMb: 5120, trafficLimitGb: 300, sortOrder: 30, isPublic: true },
+    { name: "Professional · ۳ ماهه", durationDays: 90, price: 12796500, discountPct: 5, productLimit: 100, storageLimitMb: 5120, trafficLimitGb: 300, sortOrder: 31, isPublic: true },
+    { name: "Professional · ۶ ماهه", durationDays: 180, price: 24246000, discountPct: 10, productLimit: 100, storageLimitMb: 5120, trafficLimitGb: 300, sortOrder: 32, isPublic: true },
+    { name: "Professional · ۱۲ ماهه", durationDays: 365, price: 45798000, discountPct: 15, productLimit: 100, storageLimitMb: 5120, trafficLimitGb: 300, sortOrder: 33, isPublic: true },
   ];
 
   const bundleDefs = [
@@ -68,7 +68,7 @@ async function main() {
           features: "{}",
         },
       });
-    } else if (existingPlan.trafficLimitGb == null) {
+    } else if (existingPlan.trafficLimitGb !== plan.trafficLimitGb) {
       await prisma.subscriptionPlan.update({ where: { id }, data: { trafficLimitGb: plan.trafficLimitGb } });
     }
   }
