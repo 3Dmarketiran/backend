@@ -217,7 +217,7 @@ function normalizePlanTrafficPayload(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const body = { ...(value as Record<string, unknown>) };
   const aliases = ["monthlyTrafficGb", "monthlyTrafficLimitGb", "trafficLimitGB", "monthlyTrafficLimit", "trafficQuotaGb"];
-  if (body.trafficLimitGb === undefined) {
+  if (body.trafficLimitGb === undefined || body.trafficLimitGb === null || body.trafficLimitGb === "") {
     const alias = aliases.find((key) => body[key] !== undefined);
     if (alias) body.trafficLimitGb = body[alias];
   }
@@ -948,6 +948,80 @@ subscriptionsRouter.post(
     } catch (err) {
       next(err);
     }
+  }
+);
+
+// ---------------------------------------------------------------------
+// Renew subscription: append the purchased duration after the latest
+// subscription end date. Existing time is preserved; earlier subscriptions
+// are never cancelled or overwritten.
+// ---------------------------------------------------------------------
+subscriptionsRouter.post(
+  "/renew",
+  requireAuth,
+  requireAdmin,
+  async (req, res, next) => {
+    try {
+      const input = activateSchema.parse(req.body);
+      const [seller, plan, latest] = await Promise.all([
+        prisma.seller.findUnique({ where: { id: input.sellerId }, select: { id: true, isActive: true } }),
+        prisma.subscriptionPlan.findUnique({ where: { id: input.planId } }),
+        prisma.subscription.findFirst({
+          where: { sellerId: input.sellerId, status: { in: ["ACTIVE", "EXPIRED"] }, endDate: { not: null } },
+          orderBy: { endDate: "desc" },
+        }),
+      ]);
+      if (!seller) throw new HttpError(404, "فروشنده یافت نشد.");
+      if (!seller.isActive) throw new HttpError(409, "این فروشنده غیرفعال است و نمی‌توان اشتراک آن را تمدید کرد.");
+      if (!plan) throw new HttpError(404, "پلن یافت نشد.");
+      if (!plan.isActive) throw new HttpError(409, "این پلن غیرفعال است و قابل تمدید نیست.");
+      if (plan.trafficLimitGb == null || !Number.isFinite(plan.trafficLimitGb) || plan.trafficLimitGb <= 0) {
+        throw new HttpError(409, "سقف ترافیک ماهانه این پلن در پایگاه داده ثبت نشده است. ابتدا پلن را ویرایش و ذخیره کنید.");
+      }
+      const now = new Date();
+      const requestedStart = input.startDate ? new Date(input.startDate) : now;
+      if (!isValidDate(requestedStart)) throw new HttpError(400, "تاریخ شروع تمدید نامعتبر است.");
+      const previousEnd = latest?.endDate && latest.endDate > now ? latest.endDate : now;
+      const startDate = requestedStart > previousEnd ? requestedStart : previousEnd;
+      const endDate = new Date(startDate.getTime() + plan.durationDays * 24 * 60 * 60 * 1000);
+      const subscription = await prisma.subscription.create({
+        data: { sellerId: input.sellerId, planId: input.planId, status: "ACTIVE", startDate, endDate, activatedById: req.user!.id, notes: input.notes ? `تمدید اشتراک: ${input.notes}` : "تمدید اشتراک" },
+        include: { plan: true },
+      });
+      await prisma.auditLog.create({ data: {
+        actorId: req.user!.id, sellerId: input.sellerId, action: "SUBSCRIPTION_RENEWED",
+        entity: "Subscription", entityId: subscription.id,
+        metadata: serializeJson({ planId: input.planId, startDate, endDate, previousEndDate: latest?.endDate ?? null }),
+        ipAddress: req.ip,
+      }});
+      res.status(201).json({ subscription: serializeSubscription(subscription) });
+    } catch (err) { next(err); }
+  }
+);
+
+// Expire a subscription explicitly. This is intentionally separate from
+// disabling a seller account and from cancelling a subscription.
+subscriptionsRouter.post(
+  "/:id/expire",
+  requireAuth,
+  requireAdmin,
+  async (req, res, next) => {
+    try {
+      const subscriptionId = assertRouteId(req.params.id, "شناسه اشتراک نامعتبر است.");
+      const existing = await prisma.subscription.findUnique({ where: { id: subscriptionId } });
+      if (!existing) throw new HttpError(404, "اشتراک یافت نشد.");
+      if (existing.status === "EXPIRED") throw new HttpError(409, "این اشتراک قبلاً منقضی شده است.");
+      const updated = await prisma.subscription.update({
+        where: { id: subscriptionId },
+        data: { status: "EXPIRED", endDate: new Date() },
+        include: { plan: true },
+      });
+      await prisma.auditLog.create({ data: {
+        actorId: req.user!.id, sellerId: updated.sellerId, action: "SUBSCRIPTION_EXPIRED_MANUALLY",
+        entity: "Subscription", entityId: updated.id, ipAddress: req.ip,
+      }});
+      res.json({ subscription: serializeSubscription(updated) });
+    } catch (err) { next(err); }
   }
 );
 
