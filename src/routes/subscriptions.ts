@@ -719,9 +719,13 @@ const activateSchema =
       .string()
       .cuid(),
 
+    // Plan IDs may come from legacy/imported records that are not CUIDs.
+    // The database lookup below is the authoritative existence check.
     planId: z
       .string()
-      .cuid(),
+      .trim()
+      .min(1, "شناسه پلن الزامی است.")
+      .max(128, "شناسه پلن نامعتبر است."),
 
     startDate: z
       .string()
