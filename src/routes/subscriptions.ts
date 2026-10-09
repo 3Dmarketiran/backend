@@ -255,10 +255,9 @@ const planSchema =
       .optional(),
 
     trafficLimitGb: z
-      .number()
-      .int()
-      .positive()
-      .optional(),
+      .number({ required_error: "سقف ترافیک ماهانه الزامی است." })
+      .int("سقف ترافیک باید عدد صحیح گیگابایت باشد.")
+      .positive("سقف ترافیک ماهانه باید بیشتر از صفر باشد."),
 
     categoryId: z.string().trim().min(1).nullable().optional(),
     sortOrder: z.number().int().min(0).optional(),
@@ -863,7 +862,7 @@ subscriptionsRouter.post(
             : plan.productLimit === 100 && plan.storageLimitMb === 5120
               ? 25
               : null;
-        if (inferredTraffic == null) throw new HttpError(409, "این پلن سقف ترافیک مشخصی ندارد. ابتدا سقف ترافیک پلن را در پنل مدیریت تعیین کنید.");
+        if (inferredTraffic == null) throw new HttpError(409, "سقف ترافیک ماهانه این پلن در پایگاه داده خالی است. پلن را ویرایش کنید، عدد ترافیک ماهانه را وارد و ذخیره کنید؛ سپس دوباره اشتراک را فعال کنید.");
         await prisma.subscriptionPlan.update({ where: { id: plan.id }, data: { trafficLimitGb: inferredTraffic } });
         plan.trafficLimitGb = inferredTraffic;
       }

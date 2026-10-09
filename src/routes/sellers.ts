@@ -616,7 +616,28 @@ sellersRouter.delete(
       if (failures.length) {
         throw new HttpError(502, `حذف فایل‌های فروشگاه کامل نشد؛ اطلاعات پایگاه داده حفظ شد. تعداد فایل ناموفق: ${failures.length}`);
       }
-      await prisma.seller.delete({ where: { id: sellerId } });
+      // Preserve historical logs but detach them from the seller/product/user so
+      // restrictive optional foreign keys cannot block permanent deletion.
+      await prisma.$transaction(async (tx) => {
+        const productIds = seller.products.map((product) => product.id);
+        const userId = seller.userId;
+        if (productIds.length) {
+          await tx.auditLog.updateMany({ where: { productId: { in: productIds } }, data: { productId: null } });
+          await tx.analyticsEvent.updateMany({ where: { productId: { in: productIds } }, data: { productId: null } });
+        }
+        await tx.auditLog.updateMany({ where: { sellerId }, data: { sellerId: null } });
+        await tx.analyticsEvent.updateMany({ where: { sellerId }, data: { sellerId: null } });
+        await tx.auditLog.updateMany({ where: { actorId: userId }, data: { actorId: null } });
+        await tx.loginAttempt.updateMany({ where: { userId }, data: { userId: null } });
+        await tx.trafficPurchase.updateMany({ where: { approvedById: userId }, data: { approvedById: null } });
+        // A seller account can have triggered publish jobs; the required actor FK
+        // must be removed with those jobs before deleting the user.
+        await tx.publishJob.deleteMany({ where: { triggeredById: userId } });
+        await tx.seller.delete({ where: { id: sellerId } });
+        // The seller relation cascades from Seller to User in the database schema;
+        // delete the user explicitly only if it remains after the cascade.
+        await tx.user.deleteMany({ where: { id: userId } });
+      });
       res.json({ success: true, deletedFiles: keys.size });
     } catch (error) { next(error); }
   }
