@@ -618,26 +618,26 @@ sellersRouter.delete(
       }
       // Preserve historical logs but detach them from the seller/product/user so
       // restrictive optional foreign keys cannot block permanent deletion.
-      await prisma.$transaction(async (tx) => {
-        const productIds = seller.products.map((product) => product.id);
-        const userId = seller.userId;
-        if (productIds.length) {
-          await tx.auditLog.updateMany({ where: { productId: { in: productIds } }, data: { productId: null } });
-          await tx.analyticsEvent.updateMany({ where: { productId: { in: productIds } }, data: { productId: null } });
-        }
-        await tx.auditLog.updateMany({ where: { sellerId }, data: { sellerId: null } });
-        await tx.analyticsEvent.updateMany({ where: { sellerId }, data: { sellerId: null } });
-        await tx.auditLog.updateMany({ where: { actorId: userId }, data: { actorId: null } });
-        await tx.loginAttempt.updateMany({ where: { userId }, data: { userId: null } });
-        await tx.trafficPurchase.updateMany({ where: { approvedById: userId }, data: { approvedById: null } });
-        // A seller account can have triggered publish jobs; the required actor FK
-        // must be removed with those jobs before deleting the user.
-        await tx.publishJob.deleteMany({ where: { triggeredById: userId } });
-        await tx.seller.delete({ where: { id: sellerId } });
-        // The seller relation cascades from Seller to User in the database schema;
-        // delete the user explicitly only if it remains after the cascade.
-        await tx.user.deleteMany({ where: { id: userId } });
-      });
+      const productIds = seller.products.map((product) => product.id);
+      const userId = seller.userId;
+      // Cloudflare D1's Prisma adapter does not support interactive transactions.
+      // Use a batch transaction (PrismaPromise array) so all database cleanup is atomic.
+      const cleanup = [
+        ...(productIds.length ? [
+          prisma.auditLog.updateMany({ where: { productId: { in: productIds } }, data: { productId: null } }),
+          prisma.analyticsEvent.updateMany({ where: { productId: { in: productIds } }, data: { productId: null } }),
+        ] : []),
+        prisma.auditLog.updateMany({ where: { sellerId }, data: { sellerId: null } }),
+        prisma.analyticsEvent.updateMany({ where: { sellerId }, data: { sellerId: null } }),
+        prisma.auditLog.updateMany({ where: { actorId: userId }, data: { actorId: null } }),
+        prisma.loginAttempt.updateMany({ where: { userId }, data: { userId: null } }),
+        prisma.trafficPurchase.updateMany({ where: { approvedById: userId }, data: { approvedById: null } }),
+        // Publish jobs require a valid actor and must be removed before deleting the account.
+        prisma.publishJob.deleteMany({ where: { triggeredById: userId } }),
+        prisma.seller.delete({ where: { id: sellerId } }),
+        prisma.user.deleteMany({ where: { id: userId } }),
+      ];
+      await prisma.$transaction(cleanup);
       res.json({ success: true, deletedFiles: keys.size });
     } catch (error) { next(error); }
   }

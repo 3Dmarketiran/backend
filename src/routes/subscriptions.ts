@@ -213,6 +213,21 @@ subscriptionsRouter.get(
   }
 );
 
+function normalizePlanTrafficPayload(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const body = { ...(value as Record<string, unknown>) };
+  const aliases = ["monthlyTrafficGb", "monthlyTrafficLimitGb", "trafficLimitGB", "monthlyTrafficLimit", "trafficQuotaGb"];
+  if (body.trafficLimitGb === undefined) {
+    const alias = aliases.find((key) => body[key] !== undefined);
+    if (alias) body.trafficLimitGb = body[alias];
+  }
+  if (typeof body.trafficLimitGb === "string" && body.trafficLimitGb.trim() !== "") {
+    const parsed = Number(body.trafficLimitGb);
+    if (Number.isFinite(parsed)) body.trafficLimitGb = parsed;
+  }
+  return body;
+}
+
 const planSchema =
   z.object({
     name: z
@@ -281,10 +296,7 @@ subscriptionsRouter.post(
   requireAdmin,
   async (req, res, next) => {
     try {
-      const input =
-        planSchema.parse(
-          req.body
-        );
+      const input = planSchema.parse(normalizePlanTrafficPayload(req.body));
 
       const plan =
         await prisma.subscriptionPlan.create(
@@ -371,10 +383,7 @@ subscriptionsRouter.put(
           "شناسه پلن نامعتبر است."
         );
 
-      const input =
-        planSchema
-          .partial()
-          .parse(req.body);
+      const input = planSchema.partial().parse(normalizePlanTrafficPayload(req.body));
 
       const existing =
         await prisma.subscriptionPlan.findUnique(
@@ -855,11 +864,12 @@ subscriptionsRouter.post(
       // a null quota. Repair the known platform tiers on activation so a new
       // seller never silently receives an unlimited storefront.
       if (plan.trafficLimitGb == null) {
-        const inferredTraffic = plan.productLimit === 10 && plan.storageLimitMb === 500
+        const planIdentity = `${String(plan.id || "")} ${String(plan.name || "")}`.toLowerCase();
+        const inferredTraffic = /starter/.test(planIdentity) || (plan.productLimit === 10 && plan.storageLimitMb === 500)
           ? 5
-          : plan.productLimit === 30 && plan.storageLimitMb === 1536
+          : /semi[- ]professional|semi professional/.test(planIdentity) || (plan.productLimit === 30 && plan.storageLimitMb === 1536)
             ? 12
-            : plan.productLimit === 100 && plan.storageLimitMb === 5120
+            : /professional/.test(planIdentity) || (plan.productLimit === 100 && plan.storageLimitMb === 5120)
               ? 25
               : null;
         if (inferredTraffic == null) throw new HttpError(409, "سقف ترافیک ماهانه این پلن در پایگاه داده خالی است. پلن را ویرایش کنید، عدد ترافیک ماهانه را وارد و ذخیره کنید؛ سپس دوباره اشتراک را فعال کنید.");
