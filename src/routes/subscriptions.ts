@@ -62,6 +62,32 @@ function isSubscriptionCurrentlyActive(
   );
 }
 
+function inferDefaultTrafficGb(plan: { id?: string | null; name?: string | null; productLimit?: number | null; storageLimitMb?: number | null }): number | null {
+  const identity = `${String(plan.id || "")} ${String(plan.name || "")}`.toLowerCase();
+  if (/starter/.test(identity) || (plan.productLimit === 10 && plan.storageLimitMb === 500)) return 5;
+  if (/semi[- ]professional|semi professional/.test(identity) || (plan.productLimit === 30 && (plan.storageLimitMb === 1536 || plan.storageLimitMb === 1500))) return 12;
+  if (/professional/.test(identity) || (plan.productLimit === 100 && (plan.storageLimitMb === 5120 || plan.storageLimitMb === 5000))) return 25;
+  return null;
+}
+
+async function ensurePlanTrafficQuota(plan: any): Promise<number> {
+  const current = Number(plan.trafficLimitGb);
+  if (plan.trafficLimitGb != null && Number.isFinite(current) && current > 0) return current;
+  const inferred = inferDefaultTrafficGb(plan);
+  if (inferred == null) {
+    throw new HttpError(409, "سقف ترافیک ماهانه این پلن مشخص نیست. لطفاً در صفحه پلن‌ها مقدار ترافیک را وارد و ذخیره کنید.");
+  }
+  try {
+    await prisma.subscriptionPlan.update({ where: { id: plan.id }, data: { trafficLimitGb: inferred } });
+    plan.trafficLimitGb = inferred;
+    return inferred;
+  } catch {
+    // The inferred quota can still be used for this request, but the database write
+    // must be retried by editing/saving the plan if the database is unavailable.
+    throw new HttpError(503, "مقدار ترافیک این پلن تشخیص داده شد، اما ذخیره آن در پایگاه داده ناموفق بود. اتصال Cloudflare D1 را بررسی کنید و دوباره تلاش کنید.");
+  }
+}
+
 function serializePlan(
   plan: any
 ) {
@@ -752,52 +778,17 @@ subscriptionsRouter.post(
 
       const now = new Date();
 
-      const [
-        seller,
-        plan,
-        existingActiveSubscription,
-      ] = await Promise.all([
-        prisma.seller.findUnique({
-          where: {
-            id: input.sellerId,
-          },
-          select: {
-            id: true,
-            isActive: true,
-          },
-        }),
-
-        prisma.subscriptionPlan.findUnique(
-          {
-            where: {
-              id: input.planId,
-            },
-          }
-        ),
-
-        prisma.subscription.findFirst({
-          where: {
-            sellerId:
-              input.sellerId,
-
-            status:
-              "ACTIVE",
-
-            startDate: {
-              lte: now,
-            },
-
-            endDate: {
-              gte: now,
-            },
-          },
-
-          orderBy: {
-            endDate:
-              "desc",
-          },
-        }),
-      ]);
+      // D1 HTTP adapter can time out when several reads are fired concurrently.
+      // Keep these checks sequential to reduce bursts against the same database.
+      const seller = await prisma.seller.findUnique({
+        where: { id: input.sellerId },
+        select: { id: true, isActive: true },
+      });
+      const plan = await prisma.subscriptionPlan.findUnique({ where: { id: input.planId } });
+      const existingActiveSubscription = await prisma.subscription.findFirst({
+        where: { sellerId: input.sellerId, status: "ACTIVE", startDate: { lte: now }, endDate: { gte: now } },
+        orderBy: { endDate: "desc" },
+      });
 
       if (!seller) {
         throw new HttpError(
@@ -864,22 +855,7 @@ subscriptionsRouter.post(
               1000
         );
 
-      // Older plans created before traffic quotas were made mandatory may have
-      // a null quota. Repair the known platform tiers on activation so a new
-      // seller never silently receives an unlimited storefront.
-      if (plan.trafficLimitGb == null) {
-        const planIdentity = `${String(plan.id || "")} ${String(plan.name || "")}`.toLowerCase();
-        const inferredTraffic = /starter/.test(planIdentity) || (plan.productLimit === 10 && plan.storageLimitMb === 500)
-          ? 5
-          : /semi[- ]professional|semi professional/.test(planIdentity) || (plan.productLimit === 30 && plan.storageLimitMb === 1536)
-            ? 12
-            : /professional/.test(planIdentity) || (plan.productLimit === 100 && plan.storageLimitMb === 5120)
-              ? 25
-              : null;
-        if (inferredTraffic == null) throw new HttpError(409, "سقف ترافیک ماهانه این پلن در پایگاه داده خالی است. پلن را ویرایش کنید، عدد ترافیک ماهانه را وارد و ذخیره کنید؛ سپس دوباره اشتراک را فعال کنید.");
-        await prisma.subscriptionPlan.update({ where: { id: plan.id }, data: { trafficLimitGb: inferredTraffic } });
-        plan.trafficLimitGb = inferredTraffic;
-      }
+      await ensurePlanTrafficQuota(plan);
 
       const subscription =
         await prisma.subscription.create(
@@ -967,21 +943,18 @@ subscriptionsRouter.post(
   async (req, res, next) => {
     try {
       const input = activateSchema.parse(req.body);
-      const [seller, plan, latest] = await Promise.all([
-        prisma.seller.findUnique({ where: { id: input.sellerId }, select: { id: true, isActive: true } }),
-        prisma.subscriptionPlan.findUnique({ where: { id: input.planId } }),
-        prisma.subscription.findFirst({
-          where: { sellerId: input.sellerId, status: { in: ["ACTIVE", "EXPIRED"] }, endDate: { not: null } },
-          orderBy: { endDate: "desc" },
-        }),
-      ]);
+      // Sequential D1 reads avoid concurrent adapter requests timing out.
+      const seller = await prisma.seller.findUnique({ where: { id: input.sellerId }, select: { id: true, isActive: true } });
+      const plan = await prisma.subscriptionPlan.findUnique({ where: { id: input.planId } });
+      const latest = await prisma.subscription.findFirst({
+        where: { sellerId: input.sellerId, status: { in: ["ACTIVE", "EXPIRED"] }, endDate: { not: null } },
+        orderBy: { endDate: "desc" },
+      });
       if (!seller) throw new HttpError(404, "فروشنده یافت نشد.");
       if (!seller.isActive) throw new HttpError(409, "این فروشنده غیرفعال است و نمی‌توان اشتراک آن را تمدید کرد.");
       if (!plan) throw new HttpError(404, "پلن یافت نشد.");
       if (!plan.isActive) throw new HttpError(409, "این پلن غیرفعال است و قابل تمدید نیست.");
-      if (plan.trafficLimitGb == null || !Number.isFinite(plan.trafficLimitGb) || plan.trafficLimitGb <= 0) {
-        throw new HttpError(409, "سقف ترافیک ماهانه این پلن در پایگاه داده ثبت نشده است. ابتدا پلن را ویرایش و ذخیره کنید.");
-      }
+      await ensurePlanTrafficQuota(plan);
       const now = new Date();
       const requestedStart = input.startDate ? new Date(input.startDate) : now;
       if (!isValidDate(requestedStart)) throw new HttpError(400, "تاریخ شروع تمدید نامعتبر است.");
