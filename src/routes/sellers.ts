@@ -891,7 +891,8 @@ sellersRouter.get(
       if (!seller || (!seller.logoUrl && !seller.logoStorageKey)) return res.status(404).end();
 
       const storageKey = seller.logoStorageKey || (seller.logoUrl ? extractStorageKeyFromUrl(seller.logoUrl) : null);
-      if (!storageKey) return res.redirect(seller.logoUrl);
+      if (!storageKey && seller.logoUrl) return res.redirect(seller.logoUrl);
+      if (!storageKey) return res.status(404).end();
 
       const buffer = await storage.read(storageKey);
       const extension = storageKey.split(".").pop()?.toLowerCase();
