@@ -91,8 +91,11 @@ export const listProductsQuerySchema =
     categoryId:
       z.string().cuid().optional(),
 
+    // Seller identifiers may be legacy IDs after database imports. Treat the ID
+    // as an opaque, bounded identifier; the route still enforces ownership and
+    // the database lookup is authoritative.
     sellerId:
-      z.string().cuid().optional(),
+      z.string().trim().min(1).max(128).optional(),
 
     visibility:
       z.enum([

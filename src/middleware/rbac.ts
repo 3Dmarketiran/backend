@@ -215,14 +215,18 @@ export function requireOwnSeller() {
         .json(forbiddenResponse);
     }
 
-    const sellerId =
-      req.params.id ??
-      req.params.sellerId;
+    // Routes such as /traffic/me and /traffic/purchases intentionally do not
+    // put a seller ID in the URL. In that case, scope the request to the
+    // authenticated user's own seller profile instead of rejecting it as an
+    // INVALID_SELLER_ID. Routes that do provide an ID are still checked below.
+    const routeSellerId = req.params.id ?? req.params.sellerId;
+    const sellerId = routeSellerId === undefined
+      ? req.user.seller.id
+      : typeof routeSellerId === "string"
+        ? routeSellerId.trim()
+        : "";
 
-    if (
-      typeof sellerId !== "string" ||
-      !sellerId.trim()
-    ) {
+    if (!sellerId) {
       return res
         .status(400)
         .json({

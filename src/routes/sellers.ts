@@ -888,9 +888,9 @@ sellersRouter.get(
         where: { id: sellerId },
         select: { logoUrl: true, logoStorageKey: true },
       });
-      if (!seller?.logoUrl) return res.status(404).end();
+      if (!seller || (!seller.logoUrl && !seller.logoStorageKey)) return res.status(404).end();
 
-      const storageKey = seller.logoStorageKey || extractStorageKeyFromUrl(seller.logoUrl);
+      const storageKey = seller.logoStorageKey || (seller.logoUrl ? extractStorageKeyFromUrl(seller.logoUrl) : null);
       if (!storageKey) return res.redirect(seller.logoUrl);
 
       const buffer = await storage.read(storageKey);

@@ -17,7 +17,7 @@ const trackSchema = z.object({
     "SELLER_PAGE_VIEW",
     "SEARCH",
   ]),
-  sellerId: z.string().cuid().optional(),
+  sellerId: z.string().trim().min(1).max(128).optional(),
   productId: z.string().cuid().optional(),
   metadata: z.record(z.unknown()).optional(),
 });

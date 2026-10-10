@@ -40,6 +40,27 @@ function isValidDate(
   );
 }
 
+/**
+ * Live databases can retain a 30-day duration on a plan whose name/ID clearly
+ * identifies a quarterly offering (e.g. `final-starter-90`). Repair this one
+ * known legacy mismatch at the point of purchase and persist the corrected
+ * duration so subsequent activations/renewals use the same source of truth.
+ */
+async function resolvePlanDurationDays(plan: { id: string; name: string; durationDays: number }): Promise<number> {
+  const identity = `${plan.id} ${plan.name}`.normalize("NFKC");
+  const clearlyQuarterly = /(?:[-_ ]90(?:[-_ ]|$)|۹۰|(?:3|۳|سه)[\s\u200c-]*(?:month|months|ماه)|quarter(?:ly)?|فصلی)/i.test(identity);
+  const duration = Number(plan.durationDays);
+  if (duration === 30 && clearlyQuarterly) {
+    await prisma.subscriptionPlan.update({ where: { id: plan.id }, data: { durationDays: 90 } });
+    plan.durationDays = 90;
+    return 90;
+  }
+  if (!Number.isInteger(duration) || duration <= 0 || duration > 3660) {
+    throw new HttpError(409, "مدت پلن معتبر نیست. لطفاً مدت اشتراک را در تنظیمات پلن بررسی کنید.");
+  }
+  return duration;
+}
+
 function isSubscriptionCurrentlyActive(
   status: string,
   startDate: Date | null,
@@ -741,9 +762,13 @@ subscriptionsRouter.get(
 
 const activateSchema =
   z.object({
+    // Seller identifiers may be legacy/imported opaque IDs, so validate
+    // shape/length here and let the database lookup establish existence.
     sellerId: z
       .string()
-      .cuid(),
+      .trim()
+      .min(1, "شناسه فروشنده الزامی است.")
+      .max(128, "شناسه فروشنده نامعتبر است."),
 
     // Plan IDs may come from legacy/imported records that are not CUIDs.
     // The database lookup below is the authoritative existence check.
@@ -845,15 +870,8 @@ subscriptionsRouter.post(
         );
       }
 
-      const endDate =
-        new Date(
-          startDate.getTime() +
-            plan.durationDays *
-              24 *
-              60 *
-              60 *
-              1000
-        );
+      const durationDays = await resolvePlanDurationDays(plan);
+      const endDate = new Date(startDate.getTime() + durationDays * 24 * 60 * 60 * 1000);
 
       await ensurePlanTrafficQuota(plan);
 
@@ -955,12 +973,15 @@ subscriptionsRouter.post(
       if (!plan) throw new HttpError(404, "پلن یافت نشد.");
       if (!plan.isActive) throw new HttpError(409, "این پلن غیرفعال است و قابل تمدید نیست.");
       await ensurePlanTrafficQuota(plan);
+      const durationDays = await resolvePlanDurationDays(plan);
       const now = new Date();
       const requestedStart = input.startDate ? new Date(input.startDate) : now;
       if (!isValidDate(requestedStart)) throw new HttpError(400, "تاریخ شروع تمدید نامعتبر است.");
+      // Renewal begins at the later of today or the latest subscription end.
+      // Thus a renewal made before expiry adds onto the already-paid time.
       const previousEnd = latest?.endDate && latest.endDate > now ? latest.endDate : now;
       const startDate = requestedStart > previousEnd ? requestedStart : previousEnd;
-      const endDate = new Date(startDate.getTime() + plan.durationDays * 24 * 60 * 60 * 1000);
+      const endDate = new Date(startDate.getTime() + durationDays * 24 * 60 * 60 * 1000);
       const subscription = await prisma.subscription.create({
         data: { sellerId: input.sellerId, planId: input.planId, status: "ACTIVE", startDate, endDate, activatedById: req.user!.id, notes: input.notes ? `تمدید اشتراک: ${input.notes}` : "تمدید اشتراک" },
         include: { plan: true },
@@ -968,7 +989,7 @@ subscriptionsRouter.post(
       await prisma.auditLog.create({ data: {
         actorId: req.user!.id, sellerId: input.sellerId, action: "SUBSCRIPTION_RENEWED",
         entity: "Subscription", entityId: subscription.id,
-        metadata: serializeJson({ planId: input.planId, startDate, endDate, previousEndDate: latest?.endDate ?? null }),
+        metadata: serializeJson({ planId: input.planId, durationDays, startDate, endDate, previousEndDate: latest?.endDate ?? null }),
         ipAddress: req.ip,
       }});
       res.status(201).json({ subscription: serializeSubscription(subscription) });
@@ -1114,6 +1135,33 @@ subscriptionsRouter.post(
     } catch (err) {
       next(err);
     }
+  }
+);
+
+// Delete an unused historical subscription. Active subscriptions are protected.
+subscriptionsRouter.delete(
+  "/:id",
+  requireAuth,
+  requireAdmin,
+  async (req, res, next) => {
+    try {
+      const subscriptionId = assertRouteId(req.params.id, "شناسه اشتراک نامعتبر است.");
+      const existing = await prisma.subscription.findUnique({ where: { id: subscriptionId }, include: { plan: true } });
+      if (!existing) throw new HttpError(404, "اشتراک یافت نشد.");
+      const now = new Date();
+      const isProtectedActive = existing.status === "ACTIVE" && (!existing.endDate || existing.endDate.getTime() >= now.getTime());
+      if (isProtectedActive || isSubscriptionCurrentlyActive(existing.status, existing.startDate, existing.endDate, now)) {
+        throw new HttpError(409, "اشتراک فعال قابل حذف نیست؛ ابتدا آن را منقضی کنید.");
+      }
+      await prisma.subscription.delete({ where: { id: subscriptionId } });
+      await prisma.auditLog.create({ data: {
+        actorId: req.user!.id, sellerId: existing.sellerId, action: "SUBSCRIPTION_DELETED",
+        entity: "Subscription", entityId: existing.id,
+        metadata: serializeJson({ planId: existing.planId, planName: existing.plan?.name, status: existing.status, startDate: existing.startDate, endDate: existing.endDate }),
+        ipAddress: req.ip,
+      }});
+      res.json({ success: true, deletedId: existing.id });
+    } catch (err) { next(err); }
   }
 );
 
