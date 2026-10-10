@@ -11,6 +11,7 @@ import {
   parseJson,
   serializeJson,
 } from "../utils/json";
+import { queueRepublishForSeller } from "../services/publishService";
 
 export const subscriptionsRouter =
   Router();
@@ -580,6 +581,85 @@ subscriptionsRouter.put(
         plan:
           serializePlan(plan),
       });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------
+// Admin plan deletion
+// ---------------------------------------------------------------------
+// Plans can be physically removed when they have no currently valid active
+// subscriptions. Historical/pending subscription rows for this plan are
+// removed along with it because Subscription.planId is a required FK.
+// A plan currently in use is protected so seller entitlements cannot break.
+subscriptionsRouter.delete(
+  "/plans/:id",
+  requireAuth,
+  requireAdmin,
+  async (req, res, next) => {
+    try {
+      const planId = assertRouteId(req.params.id, "شناسه پلن نامعتبر است.");
+      const plan = await prisma.subscriptionPlan.findUnique({ where: { id: planId } });
+      if (!plan) throw new HttpError(404, "پلن یافت نشد.");
+
+      const now = new Date();
+      const activeReferences = await prisma.subscription.findMany({
+        where: {
+          planId,
+          status: "ACTIVE",
+          OR: [{ endDate: null }, { endDate: { gte: now } }],
+        },
+        select: { id: true, sellerId: true, startDate: true, endDate: true },
+      });
+      if (activeReferences.length > 0) {
+        throw new HttpError(409, `این پلن هنوز به ${activeReferences.length} اشتراک فعال یا زمان‌بندی‌شده متصل است. ابتدا اشتراک‌های مربوط را خاتمه دهید؛ سپس پلن را حذف کنید.`);
+      }
+
+      const historicalReferences = await prisma.subscription.findMany({
+        where: { planId },
+        select: { id: true, sellerId: true, status: true, startDate: true, endDate: true },
+      });
+      const sellers = await prisma.seller.findMany({ select: { id: true }, take: 1 });
+
+      await prisma.$transaction([
+        // Delete only history/inactive rows. Keep the FK protection on any
+        // active or future-dated row, including one created after the pre-check;
+        // if one races in, deleting the plan fails and the whole batch rolls back.
+        prisma.subscription.deleteMany({
+          where: {
+            planId,
+            OR: [
+              { status: { not: "ACTIVE" } },
+              { status: "ACTIVE", endDate: { lt: now } },
+            ],
+          },
+        }),
+        prisma.subscriptionPlan.delete({ where: { id: planId } }),
+        prisma.auditLog.create({
+          data: {
+            actorId: req.user!.id,
+            action: "SUBSCRIPTION_PLAN_DELETED",
+            entity: "SubscriptionPlan",
+            entityId: plan.id,
+            metadata: serializeJson({
+              name: plan.name,
+              durationDays: plan.durationDays,
+              price: plan.price,
+              deletedSubscriptionRows: historicalReferences.length,
+            }),
+            ipAddress: req.ip,
+          },
+        }),
+      ]);
+
+      // Refresh the generated public snapshot too. The live catalog API reflects
+      // the deletion immediately; this rebuild keeps the checked-in fallback in
+      // sync for offline/SEO builds. A single seller triggers a full catalog rebuild.
+      if (sellers[0]) queueRepublishForSeller(sellers[0].id, req.user!.id);
+
+      res.json({ success: true, deletedId: plan.id, deletedSubscriptionRows: historicalReferences.length });
     } catch (err) {
       next(err);
     }

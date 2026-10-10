@@ -602,6 +602,41 @@ async function processPublishJob(
         message = `سایت عمومی با موفقیت منتشر شد، اما همگام‌سازی نهایی پایگاه‌داده در این لحظه انجام نشد: ${message}`;
       }
 
+      // If this was the first publish attempt and the public deployment was not
+      // verified, don't leave a never-published product marked PUBLISHED in the
+      // database. Keep previous successful products intact and let the seller
+      // correct the failure and retry.
+      if (!publicDeploymentVerified) {
+        try {
+          const failedJob = await prisma.publishJob.findUnique({
+            where: { id: jobId },
+            select: { productId: true, operation: true },
+          });
+          if (failedJob?.productId && failedJob.operation === "PUBLISH") {
+            const [failedProduct, priorSuccessfulPublish] = await Promise.all([
+              prisma.product.findUnique({
+                where: { id: failedJob.productId },
+                select: { id: true, visibility: true, hasUnpublishedChanges: true, publishedAt: true },
+              }),
+              prisma.publishJob.findFirst({
+                where: { productId: failedJob.productId, operation: "PUBLISH", status: "SUCCESS", id: { not: jobId } },
+                select: { id: true },
+              }),
+            ]);
+            if (failedProduct && !priorSuccessfulPublish && failedProduct.publishedAt == null && failedProduct.visibility === "PUBLISHED" && failedProduct.hasUnpublishedChanges) {
+              await prisma.product.update({
+                where: { id: failedProduct.id },
+                data: { visibility: "DRAFT", hasUnpublishedChanges: false },
+              });
+            }
+          }
+        } catch (rollbackError) {
+          // A rollback failure must never prevent the publish job itself from
+          // being recorded as FAILED with the original, actionable error.
+          logger.warn({ err: rollbackError, jobId }, "failed to roll back first-time publish state");
+        }
+      }
+
       await prisma.publishJob.update({
         where: { id: jobId },
         data: { status: "FAILED", errorMessage: message, finishedAt: new Date() },
